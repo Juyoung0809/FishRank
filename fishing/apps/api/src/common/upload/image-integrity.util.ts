@@ -1,3 +1,4 @@
+import { haversineKm } from '../geo.util';
 import { createHash } from 'crypto';
 import { readFile, unlink } from 'fs/promises';
 import exifr from 'exifr';
@@ -35,8 +36,16 @@ export type PhotoFreshnessResult =
 
 export type ClaimedLocation = { lat?: number; lng?: number };
 
-export function appendIntegrityNote(note: string | undefined, flag: string): string {
-  const parts = new Set((note ?? '').split(',').map((part) => part.trim()).filter(Boolean));
+export function appendIntegrityNote(
+  note: string | undefined,
+  flag: string,
+): string {
+  const parts = new Set(
+    (note ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
   parts.add(flag);
   return [...parts].join(',');
 }
@@ -48,15 +57,7 @@ export function isPlausibleGps(lat: number, lng: number): boolean {
   return true;
 }
 
-export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a =
-    Math.sin(dLat / 2) ** 2
-    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+export { haversineKm };
 
 export function assertGpsSanity(
   exifLat: number | undefined,
@@ -65,16 +66,32 @@ export function assertGpsSanity(
 ): { ok: true } | { ok: false; reason: string } {
   const hasExif = exifLat !== undefined || exifLng !== undefined;
   if (hasExif) {
-    if (exifLat === undefined || exifLng === undefined || !isPlausibleGps(exifLat, exifLng)) {
-      return { ok: false, reason: '사진의 GPS 좌표가 올바르지 않습니다. 원본 사진을 올려주세요.' };
+    if (
+      exifLat === undefined ||
+      exifLng === undefined ||
+      !isPlausibleGps(exifLat, exifLng)
+    ) {
+      return {
+        ok: false,
+        reason: '사진의 GPS 좌표가 올바르지 않습니다. 원본 사진을 올려주세요.',
+      };
     }
   }
 
   const claimLat = claim?.lat;
   const claimLng = claim?.lng;
-  const hasClaim = claimLat !== undefined && claimLng !== undefined && Number.isFinite(claimLat) && Number.isFinite(claimLng);
+  const hasClaim =
+    claimLat !== undefined &&
+    claimLng !== undefined &&
+    Number.isFinite(claimLat) &&
+    Number.isFinite(claimLng);
   if (hasExif && hasClaim && exifLat !== undefined && exifLng !== undefined) {
-    const distance = haversineKm(exifLat, exifLng, claimLat as number, claimLng as number);
+    const distance = haversineKm(
+      exifLat,
+      exifLng,
+      claimLat as number,
+      claimLng as number,
+    );
     if (distance > GPS_CLAIM_MISMATCH_KM) {
       return {
         ok: false,
@@ -98,7 +115,8 @@ export async function validatePhotoFreshness(
 ): Promise<PhotoFreshnessResult> {
   try {
     const exif = await exifr.parse(filePath, { gps: true });
-    const takenRaw = exif?.DateTimeOriginal ?? exif?.CreateDate ?? exif?.ModifyDate;
+    const takenRaw =
+      exif?.DateTimeOriginal ?? exif?.CreateDate ?? exif?.ModifyDate;
     const notes: string[] = [];
 
     let takenAt: Date | undefined;
@@ -118,15 +136,21 @@ export async function validatePhotoFreshness(
           };
         }
         if (ageMs < -5 * 60 * 1000) {
-          return { ok: false, reason: '촬영 시각이 미래로 설정된 사진은 업로드할 수 없습니다.' };
+          return {
+            ok: false,
+            reason: '촬영 시각이 미래로 설정된 사진은 업로드할 수 없습니다.',
+          };
         }
         takenAt = parsed;
       }
     }
 
-    const exifLat = typeof exif?.latitude === 'number' ? exif.latitude : undefined;
-    const exifLng = typeof exif?.longitude === 'number' ? exif.longitude : undefined;
-    if (exifLat === undefined && exifLng === undefined) notes.push('gps_missing');
+    const exifLat =
+      typeof exif?.latitude === 'number' ? exif.latitude : undefined;
+    const exifLng =
+      typeof exif?.longitude === 'number' ? exif.longitude : undefined;
+    if (exifLat === undefined && exifLng === undefined)
+      notes.push('gps_missing');
 
     const gps = assertGpsSanity(exifLat, exifLng, claim);
     if (!gps.ok) return gps;
@@ -140,6 +164,10 @@ export async function validatePhotoFreshness(
       integrityNote: notes.length ? notes.join(',') : undefined,
     };
   } catch {
-    return { ok: true, exifMissing: true, integrityNote: 'date_missing,gps_missing' };
+    return {
+      ok: true,
+      exifMissing: true,
+      integrityNote: 'date_missing,gps_missing',
+    };
   }
 }

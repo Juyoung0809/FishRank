@@ -34,3 +34,62 @@ export function assertFreeEntry(dto: { entryFee?: number; isFree?: boolean }) {
     );
   }
 }
+
+/** 운영자 대회 등록·수정 입력 */
+export type OrganizerTournamentWrite = {
+  title: string;
+  description: string;
+  category: string;
+  fishSpeciesId?: number | null;
+  region?: string | null;
+  minLengthCm?: number | null;
+  maxLengthCm?: number | null;
+  prize?: string | null;
+  prizeAmount?: number | null;
+  sponsorName?: string | null;
+  maxEntries?: number | null;
+  startAt: string;
+  endAt: string;
+  rules?: string | null;
+  status?: string;
+  entryFee?: number;
+  isFree?: boolean;
+};
+
+/** 운영자 입력 검증(무료·기간·체장 범위) 후 Prisma 저장용 데이터. 참가비는 항상 0 */
+export function toFreeTournamentData(dto: OrganizerTournamentWrite) {
+  assertFreeEntry(dto);
+  const startAt = new Date(dto.startAt);
+  const endAt = new Date(dto.endAt);
+  if (
+    Number.isNaN(startAt.getTime()) ||
+    Number.isNaN(endAt.getTime()) ||
+    endAt <= startAt
+  ) {
+    throw new BadRequestException('대회 기간이 올바르지 않습니다.');
+  }
+  const minLengthCm = dto.minLengthCm ?? null;
+  const maxLengthCm = dto.maxLengthCm ?? null;
+  if (minLengthCm != null && maxLengthCm != null && minLengthCm > maxLengthCm) {
+    throw new BadRequestException('최소 체장이 최대 체장보다 클 수 없습니다.');
+  }
+  return {
+    title: dto.title.trim(),
+    description: dto.description.trim(),
+    category: dto.category,
+    fishSpeciesId: dto.fishSpeciesId ?? null,
+    region: dto.region?.trim() || null,
+    minLengthCm,
+    maxLengthCm,
+    prize: dto.prize?.trim() || null,
+    prizeAmount: dto.prizeAmount ?? null,
+    sponsorName: dto.sponsorName?.trim() || null,
+    maxEntries: dto.maxEntries ?? null,
+    startAt,
+    endAt,
+    rules: dto.rules?.trim() || null,
+    status: dto.status || 'upcoming',
+    isFree: true,
+    entryFee: 0,
+  };
+}

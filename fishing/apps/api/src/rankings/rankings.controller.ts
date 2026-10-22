@@ -2,6 +2,8 @@ import { Controller, Get, Query, Header } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { ok } from '../common/http/api-response';
 import { RankingsService, type RankingType } from './rankings.service';
+import { RegionalRankingsService } from './regional-rankings.service';
+import { RankingOvertakesService } from './ranking-overtakes.service';
 
 const parseRankingType = (value?: string): RankingType =>
   value === 'unofficial' ? 'unofficial' : 'official';
@@ -13,7 +15,11 @@ const parseSpeciesId = (value?: string) => (value ? Number(value) : undefined);
 @ApiTags('랭킹')
 @Controller('rankings')
 export class RankingsController {
-  constructor(private rankingsService: RankingsService) {}
+  constructor(
+    private rankingsService: RankingsService,
+    private regional: RegionalRankingsService,
+    private overtakes: RankingOvertakesService,
+  ) {}
 
   @Get('regional')
   @ApiOperation({ summary: '지역별 낚시왕 목록 (지도용)' })
@@ -38,7 +44,7 @@ export class RankingsController {
     const period = parsePeriod(periodType);
     const regionLevel = parseLevel(level);
     const type = parseRankingType(rankingType);
-    const regions = await this.rankingsService.getRegionalKings(
+    const regions = await this.regional.getKings(
       regionLevel,
       period,
       parseSpeciesId(speciesId),
@@ -77,7 +83,7 @@ export class RankingsController {
     @Query('rankingType') rankingType?: string,
   ) {
     const type = parseRankingType(rankingType);
-    const data = await this.rankingsService.getRegionalRankings(
+    const data = await this.regional.getRankings(
       regionKey,
       parseLevel(level),
       parsePeriod(periodType),
@@ -105,7 +111,7 @@ export class RankingsController {
     @Query('limit') limit = 8,
   ) {
     const period = parsePeriod(periodType);
-    const overtakes = await this.rankingsService.getTopOvertakes(
+    const overtakes = await this.overtakes.getTopOvertakes(
       period,
       parseSpeciesId(speciesId),
       Number(topN),

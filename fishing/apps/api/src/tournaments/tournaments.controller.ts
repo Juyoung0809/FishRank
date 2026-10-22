@@ -7,11 +7,9 @@ import {
   Patch,
   Post,
   Query,
-  Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../common/decorators/auth.decorator';
 import {
@@ -26,12 +24,7 @@ import {
 import { ImageMagicInterceptor } from '../common/upload/image-magic.interceptor';
 import { TournamentsService } from './tournaments.service';
 import { TournamentDayCodeService } from './tournament-day-code.service';
-import { TournamentOrganizerService } from './tournament-organizer.service';
 import { SetDayCodeDto } from './dto/set-day-code.dto';
-import { OrganizerTournamentDto } from './dto/organizer-tournament.dto';
-import { OrganizerStatusDto } from './dto/organizer-status.dto';
-import { ReviewDayCodeClaimDto } from './dto/review-day-code-claim.dto';
-import { SetParticipantDto } from './dto/set-participant.dto';
 
 /** 관리자 대회 등록·수정 multipart 폼 → Prisma 입력 */
 function parseTournamentBody(body: Record<string, any>) {
@@ -51,13 +44,13 @@ function parseTournamentBody(body: Record<string, any>) {
   };
 }
 
+/** 대회 조회·참가와 관리자 대회 관리. 운영자용은 TournamentOrganizerController */
 @ApiTags('대회')
 @Controller('tournaments')
 export class TournamentsController {
   constructor(
     private tournaments: TournamentsService,
     private dayCodes: TournamentDayCodeService,
-    private organizer: TournamentOrganizerService,
   ) {}
 
   @Get()
@@ -68,135 +61,6 @@ export class TournamentsController {
   ) {
     return ok(await this.tournaments.findAll(status, category));
   }
-
-  // ── 운영자 ──────────────────────────────────────────────
-
-  @Get('organized')
-  @Auth()
-  @ApiOperation({ summary: '내가 운영하는 대회' })
-  async listOrganized(@CurrentUser() user: AuthUser) {
-    return ok(await this.organizer.list(user.id));
-  }
-
-  @Post('organized')
-  @Auth()
-  @ApiOperation({ summary: '낚시점·포인트 운영자가 무료 대회 생성' })
-  async createOrganized(
-    @CurrentUser() user: AuthUser,
-    @Body() body: OrganizerTournamentDto,
-  ) {
-    return ok(await this.organizer.create(user.id, body));
-  }
-
-  @Patch('organized/:id/status')
-  @Auth()
-  @ApiOperation({ summary: '운영 대회 상태 변경. 참가 개방은 active' })
-  async updateOrganizedStatus(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-    @Body() body: OrganizerStatusDto,
-  ) {
-    return ok(await this.organizer.updateStatus(user.id, id, body.status));
-  }
-
-  @Get('organized/:id/day-code-claims')
-  @Auth()
-  @ApiOperation({ summary: '이 대회에 제출된 일일 코드' })
-  async listDayCodeClaims(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-  ) {
-    return ok(await this.organizer.listDayCodeClaims(user.id, id));
-  }
-
-  @Patch('organized/:id/day-code-claims/:catchId')
-  @Auth()
-  @ApiOperation({ summary: '제출된 일일 코드를 수락하거나 거절' })
-  async reviewDayCodeClaim(
-    @Param('id') id: string,
-    @Param('catchId') catchId: string,
-    @CurrentUser() user: AuthUser,
-    @Body() body: ReviewDayCodeClaimDto,
-  ) {
-    return ok(
-      await this.organizer.reviewDayCodeClaim(
-        user.id,
-        id,
-        catchId,
-        body.status,
-      ),
-    );
-  }
-
-  @Patch('organized/:id')
-  @Auth()
-  @ApiOperation({ summary: '운영 대회 수정. 참가비는 항상 무료' })
-  async updateOrganized(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-    @Body() body: OrganizerTournamentDto,
-  ) {
-    return ok(await this.organizer.update(user.id, id, body));
-  }
-
-  @Get('organized/:id/participants')
-  @Auth()
-  @ApiOperation({ summary: '대회 참가자. 실격은 삭제하지 않음' })
-  async listParticipants(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-  ) {
-    return ok(await this.organizer.listParticipants(user.id, id));
-  }
-
-  @Patch('organized/:id/participants/:userId')
-  @Auth()
-  @ApiOperation({ summary: '참가자 실격 또는 복귀' })
-  async setParticipant(
-    @Param('id') id: string,
-    @Param('userId') userId: string,
-    @CurrentUser() user: AuthUser,
-    @Body() body: SetParticipantDto,
-  ) {
-    return ok(
-      await this.organizer.setDisqualified(
-        user.id,
-        id,
-        userId,
-        body.disqualified,
-        body.note,
-      ),
-    );
-  }
-
-  @Get('organized/:id/day-code')
-  @Auth()
-  @ApiOperation({ summary: '운영 중인 대회의 오늘 코드 확인' })
-  async getManagedDayCode(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-  ) {
-    return ok(await this.dayCodes.getManaged(user.id, id));
-  }
-
-  @Get('organized/:id/export')
-  @Auth()
-  @ApiOperation({ summary: '실시간 순위 CSV' })
-  async exportLeaderboard(
-    @Param('id') id: string,
-    @CurrentUser() user: AuthUser,
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    const csv = await this.organizer.exportLeaderboard(user.id, id);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="tournament-${id}.csv"`,
-    );
-    return `\uFEFF${csv}`;
-  }
-
-  // ── 참가자 ──────────────────────────────────────────────
 
   @Get('me/active')
   @Auth()

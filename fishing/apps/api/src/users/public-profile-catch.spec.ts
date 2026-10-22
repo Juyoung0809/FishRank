@@ -1,4 +1,5 @@
-import { UsersService } from './users.service';
+import { UserProfileService } from './user-profile.service';
+import { UserGearsService } from './user-gears.service';
 
 describe('공개 프로필 기록', () => {
   const secretCatch = {
@@ -17,7 +18,10 @@ describe('공개 프로필 기록', () => {
     post: { findMany: jest.fn(), count: jest.fn() },
     userGear: { findMany: jest.fn() },
   };
-  const service = new UsersService(prisma as never);
+  const service = new UserProfileService(
+    prisma as never,
+    new UserGearsService(prisma as never),
+  );
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -45,7 +49,9 @@ describe('공개 프로필 기록', () => {
     expect(body).not.toContain('LAKE1');
     expect(body).not.toContain('ffff');
     expect(result.catches[0]).not.toHaveProperty('exifLat');
-    expect(result.featuredCatches[0]).toEqual(expect.objectContaining({ id: 'c1', lengthCm: 40 }));
+    expect(result.featuredCatches[0]).toEqual(
+      expect.objectContaining({ id: 'c1', lengthCm: 40 }),
+    );
     expect(result.personalCatches[0]).not.toHaveProperty('claimedDayCode');
   });
 });

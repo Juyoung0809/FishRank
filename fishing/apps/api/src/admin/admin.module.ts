@@ -3,12 +3,14 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { AnnouncementsModule } from '../announcements/announcements.module';
 import { AdminController } from './admin.controller';
 import { AdminCatchesController } from './admin-catches.controller';
+import { AdminRankingsController } from './admin-rankings.controller';
 import { AdminCommunityController } from './admin-community.controller';
 import { AdminUsersController } from './admin-users.controller';
 import { AdminSpeciesController } from './admin-species.controller';
 import { AdminService } from './admin.service';
 import { AdminReportsService } from './admin-reports.service';
 import { AdminCatchesService } from './admin-catches.service';
+import { AdminRankingsService } from './admin-rankings.service';
 import { AdminCommunityService } from './admin-community.service';
 import { AdminUsersService } from './admin-users.service';
 import { AdminSpeciesService } from './admin-species.service';
@@ -18,6 +20,7 @@ import { AdminSpeciesService } from './admin-species.service';
   controllers: [
     AdminController,
     AdminCatchesController,
+    AdminRankingsController,
     AdminCommunityController,
     AdminUsersController,
     AdminSpeciesController,
@@ -26,6 +29,7 @@ import { AdminSpeciesService } from './admin-species.service';
     AdminService,
     AdminReportsService,
     AdminCatchesService,
+    AdminRankingsService,
     AdminCommunityService,
     AdminUsersService,
     AdminSpeciesService,

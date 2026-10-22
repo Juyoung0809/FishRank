@@ -22,7 +22,8 @@ import {
   saveUploadedFile,
 } from '../common/upload/upload.config';
 import { ImageMagicInterceptor } from '../common/upload/image-magic.interceptor';
-import { UsersService } from './users.service';
+import { UserProfileService } from './user-profile.service';
+import { UserGearsService } from './user-gears.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateFeaturedCatchesDto } from './dto/update-featured-catches.dto';
 import { UpsertUserGearDto } from './dto/upsert-user-gear.dto';
@@ -30,7 +31,10 @@ import { UpsertUserGearDto } from './dto/upsert-user-gear.dto';
 @ApiTags('사용자')
 @Controller('users')
 export class UsersController {
-  constructor(private usersService: UsersService) {}
+  constructor(
+    private profiles: UserProfileService,
+    private gears: UserGearsService,
+  ) {}
 
   @Get('me')
   @Auth()
@@ -38,10 +42,10 @@ export class UsersController {
   async getMe(@CurrentUser() user: AuthUser) {
     // JwtStrategy 가 매 요청마다 DB 에서 읽은 사용자 행이라 다시 조회하지 않는다
     const [stats, posts, featuredCatches, gears] = await Promise.all([
-      this.usersService.getMyStats(user.id),
-      this.usersService.getMyPosts(user.id),
-      this.usersService.getFeaturedCatches(user.id, user.featuredCatchIds),
-      this.usersService.getUserGears(user.id),
+      this.profiles.getStats(user.id),
+      this.profiles.getRecentPosts(user.id),
+      this.profiles.getFeaturedCatches(user.id, user.featuredCatchIds),
+      this.gears.list(user.id),
     ]);
 
     return ok({
@@ -65,7 +69,7 @@ export class UsersController {
   @Auth()
   @ApiOperation({ summary: '내 프로필 수정' })
   async updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto) {
-    return ok(await this.usersService.updateProfile(user.id, dto));
+    return ok(await this.profiles.update(user.id, dto));
   }
 
   @Patch('me/profile-image')
@@ -83,16 +87,14 @@ export class UsersController {
     const profileImage = saveUploadedFile(file);
     if (!profileImage)
       throw new BadRequestException('이미지 파일이 필요합니다.');
-    return ok(
-      await this.usersService.updateProfileImage(user.id, profileImage),
-    );
+    return ok(await this.profiles.updateImage(user.id, profileImage));
   }
 
   @Delete('me/profile-image')
   @Auth()
   @ApiOperation({ summary: '프로필 사진 삭제' })
   async deleteProfileImage(@CurrentUser() user: AuthUser) {
-    return ok(await this.usersService.updateProfileImage(user.id, null));
+    return ok(await this.profiles.updateImage(user.id, null));
   }
 
   @Patch('me/featured-catches')
@@ -102,7 +104,7 @@ export class UsersController {
     @CurrentUser() user: AuthUser,
     @Body() dto: UpdateFeaturedCatchesDto,
   ) {
-    const featuredCatches = await this.usersService.updateFeaturedCatches(
+    const featuredCatches = await this.profiles.updateFeaturedCatches(
       user.id,
       dto.catchIds,
     );
@@ -122,13 +124,7 @@ export class UsersController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() dto: UpsertUserGearDto,
   ) {
-    return ok(
-      await this.usersService.createUserGear(
-        user.id,
-        dto,
-        saveUploadedFile(file),
-      ),
-    );
+    return ok(await this.gears.create(user.id, dto, saveUploadedFile(file)));
   }
 
   @Patch('me/gears/:gearId')
@@ -146,9 +142,7 @@ export class UsersController {
     @Body() dto: UpsertUserGearDto,
   ) {
     const imageUrl = file ? saveUploadedFile(file) : undefined;
-    return ok(
-      await this.usersService.updateUserGear(user.id, gearId, dto, imageUrl),
-    );
+    return ok(await this.gears.update(user.id, gearId, dto, imageUrl));
   }
 
   @Delete('me/gears/:gearId')
@@ -158,13 +152,13 @@ export class UsersController {
     @CurrentUser() user: AuthUser,
     @Param('gearId') gearId: string,
   ) {
-    await this.usersService.deleteUserGear(user.id, gearId);
+    await this.gears.delete(user.id, gearId);
     return { success: true };
   }
 
   @Get('profile/:nickname')
   @ApiOperation({ summary: '유저 공개 프로필 조회' })
   async getProfile(@Param('nickname') nickname: string) {
-    return ok(await this.usersService.getPublicProfile(nickname));
+    return ok(await this.profiles.getPublicProfile(nickname));
   }
 }

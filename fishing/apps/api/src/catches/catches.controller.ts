@@ -22,6 +22,7 @@ import { ok } from '../common/http/api-response';
 import { createImageUploadInterceptor } from '../common/upload/upload.config';
 import { ImageMagicInterceptor } from '../common/upload/image-magic.interceptor';
 import { CatchesService } from './catches.service';
+import { CatchRecordsService } from './catch-records.service';
 import { CatchVotesService } from './catch-votes.service';
 import { CaptureSessionService } from './capture-session.service';
 import { UpdatePersonalCatchDto } from './dto/update-personal-catch.dto';
@@ -31,6 +32,7 @@ import { UpdatePersonalCatchDto } from './dto/update-personal-catch.dto';
 export class CatchesController {
   constructor(
     private catchesService: CatchesService,
+    private records: CatchRecordsService,
     private votes: CatchVotesService,
     private captureSessions: CaptureSessionService,
   ) {}
@@ -92,7 +94,7 @@ export class CatchesController {
     @Query('recordType') recordType?: string,
   ) {
     return ok(
-      await this.catchesService.findMyList(
+      await this.records.findMyList(
         user.id,
         Number(page),
         Number(limit),
@@ -109,14 +111,14 @@ export class CatchesController {
     @Param('id') id: string,
     @Body() body: UpdatePersonalCatchDto,
   ) {
-    return ok(await this.catchesService.updatePersonal(user.id, id, body));
+    return ok(await this.records.updatePersonal(user.id, id, body));
   }
 
   @Delete(':id/personal')
   @Auth()
   @ApiOperation({ summary: '자랑 기록 삭제' })
   async deletePersonal(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    await this.catchesService.deletePersonal(user.id, id);
+    await this.records.deletePersonal(user.id, id);
     return ok({ deleted: true });
   }
 
@@ -144,12 +146,12 @@ export class CatchesController {
   @Auth()
   @ApiOperation({ summary: 'AI 처리 상태 확인' })
   async getStatus(@Param('id') id: string) {
-    return ok(await this.catchesService.findStatus(id));
+    return ok(await this.records.findStatus(id));
   }
 
   @Get(':id')
   @ApiOperation({ summary: '낚시 기록 단건 조회' })
   async findOne(@Param('id') id: string) {
-    return ok(await this.catchesService.findById(id));
+    return ok(await this.records.findById(id));
   }
 }

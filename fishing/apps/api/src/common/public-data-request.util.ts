@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import axios from 'axios';
 
 export async function fetchPublicDataJson(
@@ -9,7 +10,9 @@ export async function fetchPublicDataJson(
   const text = typeof res.data === 'string' ? res.data : String(res.data ?? '');
 
   if (text.trim().startsWith('<')) {
-    throw new Error('공공데이터 API가 XML로 응답했습니다. type=json 파라미터를 확인하세요.');
+    throw new Error(
+      '공공데이터 API가 XML로 응답했습니다. type=json 파라미터를 확인하세요.',
+    );
   }
 
   try {
@@ -50,15 +53,23 @@ async function fetchPublicDataRaw(
   });
 
   if (res.status === 403 || res.status === 401) {
-    throw new PublicDataAuthError('공공데이터 API 활용승인 대기 중이거나 인증키가 유효하지 않습니다.');
+    throw new PublicDataAuthError(
+      '공공데이터 API 활용승인 대기 중이거나 인증키가 유효하지 않습니다.',
+    );
   }
   if (res.status >= 400) {
-    const snippet = typeof res.data === 'string' ? res.data.slice(0, 120) : String(res.data).slice(0, 120);
+    const snippet =
+      typeof res.data === 'string'
+        ? res.data.slice(0, 120)
+        : String(res.data).slice(0, 120);
     throw new Error(`공공데이터 API HTTP ${res.status}: ${snippet}`);
   }
 
   const body = typeof res.data === 'string' ? res.data : '';
-  if (body.includes('returnReasonCode') && !body.includes('returnReasonCode>00<')) {
+  if (
+    body.includes('returnReasonCode') &&
+    !body.includes('returnReasonCode>00<')
+  ) {
     const code = body.match(/<returnReasonCode>([^<]+)</)?.[1];
     if (code && code !== '00') {
       throw new Error(`공공데이터 API 오류 코드: ${code}`);
@@ -83,7 +94,8 @@ export function extractKhoaItems(payload: unknown): Record<string, unknown>[] {
   const data = root.data;
   if (Array.isArray(data)) return data as Record<string, unknown>[];
 
-  const body = (root.body ?? (root.response as Record<string, unknown> | undefined)?.body) as
+  const body = (root.body ??
+    (root.response as Record<string, unknown> | undefined)?.body) as
     | Record<string, unknown>
     | undefined;
   const items = body?.items;
@@ -110,7 +122,9 @@ export function parseKrcXmlItems(xml: string): Record<string, unknown>[] {
 }
 
 /** KRC 저수지 API — XML 문자열 또는 JSON */
-export function extractReservoirRows(payload: unknown): Record<string, unknown>[] {
+export function extractReservoirRows(
+  payload: unknown,
+): Record<string, unknown>[] {
   if (typeof payload === 'string') {
     return parseKrcXmlItems(payload);
   }
@@ -124,25 +138,31 @@ export function extractReservoirRows(payload: unknown): Record<string, unknown>[
       if (body.item) {
         const item = body.item;
         if (Array.isArray(item)) return item as Record<string, unknown>[];
-        if (item && typeof item === 'object') return [item as Record<string, unknown>];
+        if (item && typeof item === 'object')
+          return [item as Record<string, unknown>];
       }
       const items = body.items;
       if (items && typeof items === 'object') {
         const item = (items as Record<string, unknown>).item;
         if (Array.isArray(item)) return item as Record<string, unknown>[];
-        if (item && typeof item === 'object') return [item as Record<string, unknown>];
+        if (item && typeof item === 'object')
+          return [item as Record<string, unknown>];
       }
     }
   }
 
   const item = root.item;
   if (Array.isArray(item)) return item as Record<string, unknown>[];
-  if (item && typeof item === 'object') return [item as Record<string, unknown>];
+  if (item && typeof item === 'object')
+    return [item as Record<string, unknown>];
 
   return [];
 }
 
-export function pickRecordField(item: Record<string, unknown>, keys: string[]): string | null {
+export function pickRecordField(
+  item: Record<string, unknown>,
+  keys: string[],
+): string | null {
   for (const key of keys) {
     const value = item[key];
     if (value === null || value === undefined) continue;
@@ -150,4 +170,15 @@ export function pickRecordField(item: Record<string, unknown>, keys: string[]): 
     if (text && text !== 'null') return text;
   }
   return null;
+}
+
+/** 공공데이터 인증 오류(미승인·키 오류)는 503 으로 바꿔 알리고, 그 밖의 오류는 그대로 던진다. */
+export async function withPublicDataAuth<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof PublicDataAuthError)
+      throw new ServiceUnavailableException(err.message);
+    throw err;
+  }
 }

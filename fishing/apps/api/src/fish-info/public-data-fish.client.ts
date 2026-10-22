@@ -9,6 +9,15 @@ import {
   pickField,
 } from './data-go-kr.util';
 import { extractNifsItems, getNifsResultCode } from './nifs.util';
+import {
+  buildRecord,
+  FRESHWATER_FIELDS,
+  MARINE_FIELDS,
+  NIFS_FIELDS,
+  odcloudTaxonomy,
+  pickBestItem,
+  type FieldMap,
+} from './public-fish-record.util';
 
 export type PublicFishRecord = {
   nameKo: string | null;
@@ -32,8 +41,7 @@ export type MofFishSpeciesRow = {
   category: 'freshwater' | 'saltwater' | 'brackish';
 };
 
-type FieldMap = [string[], string[], string[], string[], string[], string[], string[], string[]];
-
+/** 공공 생물종 API(MBRIS·해양수산부·국립수산과학원·낙동강) 조회. 실패하면 null·[] */
 @Injectable()
 export class PublicDataFishClient {
   constructor(private config: ConfigService) {}
@@ -46,45 +54,72 @@ export class PublicDataFishClient {
     return this.config.get<string>('NIFS_API_KEY') ?? null;
   }
 
-  async searchMarineSpecies(nameKo: string, scientificName?: string): Promise<PublicFishRecord | null> {
+  /** 바다 어종은 MBRIS → 해양수산부 → 수산과학원, 민물은 수산과학원 → 해양수산부 → 낙동강 순 */
+  async searchByCategory(
+    nameKo: string,
+    category: 'freshwater' | 'saltwater' | 'brackish',
+    scientificName?: string,
+  ): Promise<PublicFishRecord | null> {
+    if (category === 'saltwater' || category === 'brackish') {
+      return (
+        (await this.searchMarineSpecies(nameKo, scientificName)) ??
+        (await this.searchMarineBasicInfo(nameKo, scientificName)) ??
+        (await this.searchNifsSpecies(nameKo, scientificName))
+      );
+    }
+    return (
+      (await this.searchNifsSpecies(nameKo, scientificName)) ??
+      (await this.searchMarineBasicInfo(nameKo, scientificName)) ??
+      (await this.searchFreshwaterBioResource(nameKo, scientificName))
+    );
+  }
+
+  async searchMarineSpecies(
+    nameKo: string,
+    scientificName?: string,
+  ): Promise<PublicFishRecord | null> {
     const baseUrl = this.config.get<string>('MBRIS_MARINE_SPECIES_URL');
     if (!baseUrl || !this.serviceKey) return null;
-
     return this.fetchDataGoKrBestMatch(
       baseUrl,
       { korNm: nameKo },
       'mbris',
       nameKo,
       scientificName,
-      this.marineFieldMap(),
+      MARINE_FIELDS,
     );
   }
 
-  async searchMarineBasicInfo(nameKo: string, scientificName?: string): Promise<PublicFishRecord | null> {
+  async searchMarineBasicInfo(
+    nameKo: string,
+    scientificName?: string,
+  ): Promise<PublicFishRecord | null> {
     const baseUrl = this.config.get<string>('MOF_MARINE_SPECIES_URL');
     if (!baseUrl || !this.serviceKey) return null;
-
     return this.fetchDataGoKrBestMatch(
       baseUrl,
       { korNm: nameKo, speciesNm: nameKo },
       'mof',
       nameKo,
       scientificName,
-      this.marineFieldMap(),
+      MARINE_FIELDS,
     );
   }
 
   /** 국립수산과학원 생물종정보 (nifs.go.kr 별도 키) */
-  async searchNifsSpecies(nameKo: string, scientificName?: string): Promise<PublicFishRecord | null> {
+  async searchNifsSpecies(
+    nameKo: string,
+    scientificName?: string,
+  ): Promise<PublicFishRecord | null> {
     if (!this.nifsApiKey) return null;
 
     const baseUrl =
-      this.config.get<string>('NIFS_API_URL') ?? 'https://www.nifs.go.kr/OpenAPI_json';
-    const apiId = this.config.get<string>('NIFS_SPECIES_API_ID') ?? 'speciesList';
-    const nameParam = this.config.get<string>('NIFS_SPECIES_NAME_PARAM') ?? 'spcsKrnNm';
-
-    const [koKeys, enKeys, sciKeys, taxKeys, habKeys, distKeys, ecoKeys, morphKeys] =
-      this.nifsFieldMap();
+      this.config.get<string>('NIFS_API_URL') ??
+      'https://www.nifs.go.kr/OpenAPI_json';
+    const apiId =
+      this.config.get<string>('NIFS_SPECIES_API_ID') ?? 'speciesList';
+    const nameParam =
+      this.config.get<string>('NIFS_SPECIES_NAME_PARAM') ?? 'spcsKrnNm';
 
     return axios
       .get(baseUrl, {
@@ -100,28 +135,10 @@ export class PublicDataFishClient {
       .then((res) => {
         const code = getNifsResultCode(res.data);
         if (code && code !== '00') return null;
-
         const items = extractNifsItems(res.data);
-        if (!items.length) return null;
-
-        const item = this.pickBestItem(items, nameKo, scientificName, koKeys, sciKeys);
-        if (!item) return null;
-
-        const foundKo = pickField(item, koKeys);
-        const foundSci = pickField(item, sciKeys);
-
-        return {
-          nameKo: foundKo,
-          nameEn: pickField(item, enKeys),
-          scientificName: foundSci,
-          taxonomy: pickField(item, taxKeys),
-          habitat: pickField(item, habKeys),
-          distribution: pickField(item, distKeys),
-          ecology: pickField(item, ecoKeys),
-          morphology: pickField(item, morphKeys),
-          source: 'nifs' as const,
-          matched: this.isNameMatch(foundKo, nameKo, foundSci, scientificName),
-        };
+        return items.length
+          ? buildRecord(items, nameKo, scientificName, 'nifs', NIFS_FIELDS)
+          : null;
       })
       .catch(() => null);
   }
@@ -134,45 +151,31 @@ export class PublicDataFishClient {
     const baseUrl = this.config.get<string>('NAKDONG_FRESHWATER_URL');
     if (!baseUrl || !this.serviceKey) return null;
 
-    const fieldMap = this.freshwaterFieldMap();
-    const [koKeys, , sciKeys] = fieldMap;
-
     // 서버 검색 파라미터 미지원 → 여러 페이지를 훑으며 클라이언트 매칭
     for (let pageNo = 1; pageNo <= 3; pageNo++) {
       const items = await this.fetchNakdongPage(baseUrl, pageNo, 100);
-      const item = this.pickBestItem(items, nameKo, scientificName, koKeys, sciKeys, false);
+      const item = pickBestItem(
+        items,
+        nameKo,
+        scientificName,
+        FRESHWATER_FIELDS,
+        false,
+      );
       if (!item) continue;
 
-      const record = this.buildRecord([item], nameKo, scientificName, 'nakdong', fieldMap);
+      const record = buildRecord(
+        [item],
+        nameKo,
+        scientificName,
+        'nakdong',
+        FRESHWATER_FIELDS,
+      );
       if (record?.matched) return record;
     }
-
     return null;
   }
 
-  async searchByCategory(
-    nameKo: string,
-    category: 'freshwater' | 'saltwater' | 'brackish',
-    scientificName?: string,
-  ): Promise<PublicFishRecord | null> {
-    const isMarine = category === 'saltwater' || category === 'brackish';
-
-    if (isMarine) {
-      return (
-        (await this.searchMarineSpecies(nameKo, scientificName)) ??
-        (await this.searchMarineBasicInfo(nameKo, scientificName)) ??
-        (await this.searchNifsSpecies(nameKo, scientificName))
-      );
-    }
-
-    return (
-      (await this.searchNifsSpecies(nameKo, scientificName)) ??
-      (await this.searchMarineBasicInfo(nameKo, scientificName)) ??
-      (await this.searchFreshwaterBioResource(nameKo, scientificName))
-    );
-  }
-
-  /** 해양수산부 DB에서 어류(FI)·종(species) 전체 목록 수집 */
+  /** 해양수산부 DB에서 어류(FI)·종(species) 전체 목록 수집 (학명 중복 제거) */
   async fetchAllMofFishSpecies(): Promise<MofFishSpeciesRow[]> {
     const baseUrl = this.config.get<string>('MOF_MARINE_SPECIES_URL');
     if (!baseUrl || !this.serviceKey || !isOdcloudUrl(baseUrl)) return [];
@@ -180,10 +183,9 @@ export class PublicDataFishClient {
     const perPage = 100;
     const rows: MofFishSpeciesRow[] = [];
     const seen = new Set<string>();
-    let page = 1;
     let matchCount = Number.POSITIVE_INFINITY;
 
-    while ((page - 1) * perPage < matchCount) {
+    for (let page = 1; (page - 1) * perPage < matchCount; page++) {
       const res = await axios
         .get(baseUrl, {
           params: {
@@ -196,84 +198,19 @@ export class PublicDataFishClient {
           timeout: 30000,
         })
         .catch(() => null);
-
       if (!res?.data) break;
 
       matchCount = Number(res.data.matchCount ?? res.data.totalCount ?? 0);
       const items = extractOdcloudItems(res.data);
       if (!items.length) break;
 
-      for (const item of items) {
-        const row = this.mapMofFishRow(item);
-        if (!row) continue;
-        const key = row.scientificName.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
+      for (const row of items.map(mapMofFishRow)) {
+        if (!row || seen.has(row.scientificName.toLowerCase())) continue;
+        seen.add(row.scientificName.toLowerCase());
         rows.push(row);
       }
-
-      page += 1;
     }
-
     return rows;
-  }
-
-  private mapMofFishRow(item: Record<string, unknown>): MofFishSpeciesRow | null {
-    const nameKo = pickField(item, ['국명', 'korNm', 'koreanName']);
-    const scientificName = pickField(item, ['학명', 'sciNm', 'scientificName']);
-    if (!nameKo || !scientificName) return null;
-
-    const taxonomy = ['생물분류대분류', '생물분류중분류', '생물분류소분류']
-      .map((key) => pickField(item, [key]))
-      .filter(Boolean)
-      .join(' > ');
-
-    return {
-      nameKo,
-      nameEn: pickField(item, ['영명', 'engNm', 'englishName']),
-      scientificName,
-      taxonomy: taxonomy || null,
-      category: 'saltwater',
-    };
-  }
-
-  private marineFieldMap(): FieldMap {
-    return [
-      ['korNm', 'koreanName', 'spcsKrnNm', 'speciesNm', '국명'],
-      ['engNm', 'englishName', 'spcsEngNm', '영명'],
-      ['sciNm', 'scientificName', 'spcsScinNm', 'stnmItl', '학명'],
-      ['taxonFullNm', 'clsFullNm', 'classification', 'bioClsFullNm'],
-      ['habitat', 'habitats', 'hab'],
-      ['rgnDist', 'distribution', 'distrib', 'domesticDist'],
-      ['ecology', 'ecoInfo', 'ecologicalInfo'],
-      ['morph', 'morphology', 'formInfo'],
-    ];
-  }
-
-  private nifsFieldMap(): FieldMap {
-    return [
-      ['spcsKrnNm', 'speciesNm', 'korNm', 'koreanName', 'commNm'],
-      ['spcsEngNm', 'englishNm', 'engNm', 'englishName'],
-      ['spcsScinNm', 'scientificNm', 'sciNm', 'scientificName'],
-      ['bioClsFullNm', 'classification', 'taxonFullNm', 'clsFullNm'],
-      ['livingEnv', 'habitat', 'habitats', 'hab'],
-      ['distribution', 'rgnDist', 'distrib'],
-      ['ecology', 'ecoInfo'],
-      ['morphology', 'morph', 'formInfo'],
-    ];
-  }
-
-  private freshwaterFieldMap(): FieldMap {
-    return [
-      ['korean_name', 'korNm', 'koreanName', 'taxonKnm', 'commNm', 'speciesNm'],
-      ['engNm', 'englishName'],
-      ['scientific_name', 'sciNm', 'scientificName', 'taxonNm'],
-      ['taxonomy', 'taxonFullNm', 'classification', 'clsFullNm', 'taxon'],
-      ['habitat', 'habitats'],
-      ['distribution', 'rgnDist', 'institution'],
-      ['ecology', 'ecoInfo', 'category1', 'category2'],
-      ['morphology', 'morph'],
-    ];
   }
 
   private fetchNakdongPage(
@@ -293,8 +230,7 @@ export class PublicDataFishClient {
       })
       .then((res) => {
         const code = getPublicDataResultCode(res.data);
-        if (code && code !== '00') return [];
-        return extractPublicDataItems(res.data);
+        return code && code !== '00' ? [] : extractPublicDataItems(res.data);
       })
       .catch(() => []);
   }
@@ -305,149 +241,64 @@ export class PublicDataFishClient {
     source: PublicFishRecord['source'],
     expectedNameKo: string,
     expectedScientific: string | undefined,
-    fieldMap: FieldMap,
+    fields: FieldMap,
   ): Promise<PublicFishRecord | null> {
     if (!this.serviceKey) return Promise.resolve(null);
 
-    if (isOdcloudUrl(baseUrl)) {
-      return this.fetchOdcloudBestMatch(baseUrl, expectedNameKo, expectedScientific, source, fieldMap);
-    }
-
-    const [koKeys, enKeys, sciKeys, taxKeys, habKeys, distKeys, ecoKeys, morphKeys] = fieldMap;
-
-    return axios
-      .get(baseUrl, {
-        params: {
+    // odcloud 는 국명 LIKE 검색, 그 밖의 data.go.kr 은 쿼리 파라미터 검색
+    const odcloud = isOdcloudUrl(baseUrl);
+    const params = odcloud
+      ? {
+          serviceKey: this.serviceKey,
+          page: 1,
+          perPage: 20,
+          'cond[국명::LIKE]': expectedNameKo,
+        }
+      : {
           serviceKey: this.serviceKey,
           pageNo: 1,
           numOfRows: 20,
           resultType: 'json',
           type: 'json',
           ...queryParams,
-        },
-        timeout: 15000,
-      })
-      .then((res) => {
-        const code = getPublicDataResultCode(res.data);
-        if (code && code !== '00') return null;
+        };
 
-        const items = extractPublicDataItems(res.data);
-        if (!items.length) return null;
-
-        return this.buildRecord(
-          items,
-          expectedNameKo,
-          expectedScientific,
-          source,
-          fieldMap,
-        );
-      })
-      .catch(() => null);
-  }
-
-  private fetchOdcloudBestMatch(
-    baseUrl: string,
-    expectedNameKo: string,
-    expectedScientific: string | undefined,
-    source: PublicFishRecord['source'],
-    fieldMap: FieldMap,
-  ): Promise<PublicFishRecord | null> {
     return axios
-      .get(baseUrl, {
-        params: {
-          serviceKey: this.serviceKey,
-          page: 1,
-          perPage: 20,
-          'cond[국명::LIKE]': expectedNameKo,
-        },
-        timeout: 15000,
-      })
+      .get(baseUrl, { params, timeout: 15000 })
       .then((res) => {
-        const items = extractOdcloudItems(res.data);
-        if (!items.length) return null;
-
-        return this.buildRecord(items, expectedNameKo, expectedScientific, source, fieldMap);
+        if (!odcloud) {
+          const code = getPublicDataResultCode(res.data);
+          if (code && code !== '00') return null;
+        }
+        const items = odcloud
+          ? extractOdcloudItems(res.data)
+          : extractPublicDataItems(res.data);
+        return items.length
+          ? buildRecord(
+              items,
+              expectedNameKo,
+              expectedScientific,
+              source,
+              fields,
+            )
+          : null;
       })
       .catch(() => null);
   }
+}
 
-  private buildRecord(
-    items: Record<string, unknown>[],
-    expectedNameKo: string,
-    expectedScientific: string | undefined,
-    source: PublicFishRecord['source'],
-    fieldMap: FieldMap,
-  ): PublicFishRecord | null {
-    const [koKeys, enKeys, sciKeys, taxKeys, habKeys, distKeys, ecoKeys, morphKeys] = fieldMap;
+function mapMofFishRow(
+  item: Record<string, unknown>,
+): MofFishSpeciesRow | null {
+  const nameKo = pickField(item, ['국명', 'korNm', 'koreanName']);
+  const scientificName = pickField(item, ['학명', 'sciNm', 'scientificName']);
+  if (!nameKo || !scientificName) return null;
 
-    const item = this.pickBestItem(items, expectedNameKo, expectedScientific, koKeys, sciKeys);
-    if (!item) return null;
-
-    const nameKo = pickField(item, koKeys);
-    const scientificName = pickField(item, sciKeys);
-
-    return {
-      nameKo,
-      nameEn: pickField(item, enKeys),
-      scientificName,
-      taxonomy: this.composeTaxonomy(item, taxKeys),
-      habitat: pickField(item, habKeys),
-      distribution: pickField(item, distKeys),
-      ecology: pickField(item, ecoKeys),
-      morphology: pickField(item, morphKeys),
-      source,
-      matched: this.isNameMatch(nameKo, expectedNameKo, scientificName, expectedScientific),
-    };
-  }
-
-  private composeTaxonomy(item: Record<string, unknown>, taxKeys: string[]): string | null {
-    const odcloudParts = ['생물분류대분류', '생물분류중분류', '생물분류소분류']
-      .map((key) => pickField(item, [key]))
-      .filter(Boolean);
-    if (odcloudParts.length) return odcloudParts.join(' > ');
-
-    return pickField(item, taxKeys);
-  }
-
-  private pickBestItem(
-    items: Record<string, unknown>[],
-    expectedNameKo: string,
-    expectedScientific: string | undefined,
-    koKeys: string[],
-    sciKeys: string[],
-    allowFallback = true,
-  ): Record<string, unknown> | null {
-    for (const item of items) {
-      const ko = pickField(item, koKeys);
-      const sci = pickField(item, sciKeys);
-      if (this.isNameMatch(ko, expectedNameKo, sci, expectedScientific)) return item;
-    }
-
-    for (const item of items) {
-      const ko = pickField(item, koKeys);
-      if (ko && (ko.includes(expectedNameKo) || expectedNameKo.includes(ko.replace(/\(.*\)/, '').trim()))) {
-        return item;
-      }
-    }
-
-    if (!allowFallback) return null;
-    return items[0] ?? null;
-  }
-
-  private isNameMatch(
-    foundKo: string | null,
-    expectedKo: string,
-    foundSci: string | null,
-    expectedSci?: string,
-  ): boolean {
-    if (expectedSci && foundSci) {
-      const a = expectedSci.toLowerCase();
-      const b = foundSci.toLowerCase();
-      if (b === a || b.startsWith(`${a} `) || b.includes(a)) return true;
-    }
-    if (!foundKo) return false;
-    const a = expectedKo.replace(/\s/g, '');
-    const b = foundKo.replace(/\s/g, '').replace(/\(.*\)/, '');
-    return b.includes(a) || a.includes(b);
-  }
+  return {
+    nameKo,
+    nameEn: pickField(item, ['영명', 'engNm', 'englishName']),
+    scientificName,
+    taxonomy: odcloudTaxonomy(item),
+    category: 'saltwater',
+  };
 }

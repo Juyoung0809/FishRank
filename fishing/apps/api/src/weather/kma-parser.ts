@@ -1,4 +1,4 @@
-type KmaItem = {
+export type KmaItem = {
   category: string;
   obsrValue?: string;
   fcstValue?: string;
@@ -14,7 +14,9 @@ export function itemsToMap(items: KmaItem[]): Record<string, string> {
   return map;
 }
 
-export function groupFcstItems(items: KmaItem[]): Record<string, Record<string, string>> {
+export function groupFcstItems(
+  items: KmaItem[],
+): Record<string, Record<string, string>> {
   const grouped: Record<string, Record<string, string>> = {};
   for (const item of items) {
     if (!item.fcstDate || !item.fcstTime) continue;
@@ -75,7 +77,24 @@ export function skyToLabel(sky: number): string {
 }
 
 export function windDirectionLabel(deg: number): string {
-  const dirs = ['북', '북북동', '북동', '동북동', '동', '동남동', '남동', '남남동', '남', '남남서', '남서', '서남서', '서', '서북서', '북서', '북북서'];
+  const dirs = [
+    '북',
+    '북북동',
+    '북동',
+    '동북동',
+    '동',
+    '동남동',
+    '남동',
+    '남남동',
+    '남',
+    '남남서',
+    '남서',
+    '서남서',
+    '서',
+    '서북서',
+    '북서',
+    '북북서',
+  ];
   const idx = Math.round(deg / 22.5) % 16;
   return dirs[idx];
 }

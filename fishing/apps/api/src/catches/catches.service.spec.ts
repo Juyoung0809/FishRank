@@ -4,6 +4,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { CatchesService } from './catches.service';
+import { CatchRecordsService } from './catch-records.service';
 import { removeUploadedFile } from '../common/upload/image-integrity.util';
 import { computePerceptualHash } from '../common/upload/image-phash.util';
 
@@ -186,7 +187,9 @@ describe('CatchesService 이미지 해시', () => {
       certification: { grade: 'S' },
     });
 
-    const result = await service.findById('catch-1');
+    const result = await new CatchRecordsService(prisma as never).findById(
+      'catch-1',
+    );
 
     expect(result).toEqual(
       expect.objectContaining({
@@ -243,7 +246,10 @@ describe('CatchesService 이미지 해시', () => {
     });
     prisma.catch.update.mockResolvedValue({ id: 'catch-1' });
 
-    await service.deletePersonal('user-1', 'catch-1');
+    await new CatchRecordsService(prisma as never).deletePersonal(
+      'user-1',
+      'catch-1',
+    );
 
     expect(prisma.catch.update).toHaveBeenCalledWith(
       expect.objectContaining({

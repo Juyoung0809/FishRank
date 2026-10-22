@@ -7,31 +7,12 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { leaderboardCsv } from './live-leaderboard.util';
 import {
-  assertFreeEntry,
   findManagedTournament,
+  toFreeTournamentData,
   TOURNAMENT_STATUSES,
+  type OrganizerTournamentWrite,
 } from './tournament-policy.util';
 import { TournamentsService } from './tournaments.service';
-
-type OrganizerTournamentWrite = {
-  title: string;
-  description: string;
-  category: string;
-  fishSpeciesId?: number | null;
-  region?: string | null;
-  minLengthCm?: number | null;
-  maxLengthCm?: number | null;
-  prize?: string | null;
-  prizeAmount?: number | null;
-  sponsorName?: string | null;
-  maxEntries?: number | null;
-  startAt: string;
-  endAt: string;
-  rules?: string | null;
-  status?: string;
-  entryFee?: number;
-  isFree?: boolean;
-};
 
 /** 낚시점·포인트 운영자가 여는 무료 대회: 대회 관리, 참가자, 일일 코드 심사 */
 @Injectable()
@@ -53,7 +34,7 @@ export class TournamentOrganizerService {
   async create(userId: string, dto: OrganizerTournamentWrite) {
     await this.assertOrganizer(userId);
     return this.prisma.tournament.create({
-      data: { ...this.toFreeTournamentData(dto), organizerId: userId },
+      data: { ...toFreeTournamentData(dto), organizerId: userId },
     });
   }
 
@@ -68,7 +49,7 @@ export class TournamentOrganizerService {
     }
     return this.prisma.tournament.update({
       where: { id },
-      data: this.toFreeTournamentData(dto),
+      data: toFreeTournamentData(dto),
     });
   }
 
@@ -176,48 +157,5 @@ export class TournamentOrganizerService {
       throw new ForbiddenException('대회 운영자만 사용할 수 있습니다.');
     }
     return user;
-  }
-
-  private toFreeTournamentData(dto: OrganizerTournamentWrite) {
-    assertFreeEntry(dto);
-    const startAt = new Date(dto.startAt);
-    const endAt = new Date(dto.endAt);
-    if (
-      Number.isNaN(startAt.getTime()) ||
-      Number.isNaN(endAt.getTime()) ||
-      endAt <= startAt
-    ) {
-      throw new BadRequestException('대회 기간이 올바르지 않습니다.');
-    }
-    const minLengthCm = dto.minLengthCm ?? null;
-    const maxLengthCm = dto.maxLengthCm ?? null;
-    if (
-      minLengthCm != null &&
-      maxLengthCm != null &&
-      minLengthCm > maxLengthCm
-    ) {
-      throw new BadRequestException(
-        '최소 체장이 최대 체장보다 클 수 없습니다.',
-      );
-    }
-    return {
-      title: dto.title.trim(),
-      description: dto.description.trim(),
-      category: dto.category,
-      fishSpeciesId: dto.fishSpeciesId ?? null,
-      region: dto.region?.trim() || null,
-      minLengthCm,
-      maxLengthCm,
-      prize: dto.prize?.trim() || null,
-      prizeAmount: dto.prizeAmount ?? null,
-      sponsorName: dto.sponsorName?.trim() || null,
-      maxEntries: dto.maxEntries ?? null,
-      startAt,
-      endAt,
-      rules: dto.rules?.trim() || null,
-      status: dto.status || 'upcoming',
-      isFree: true,
-      entryFee: 0,
-    };
   }
 }

@@ -2,11 +2,15 @@ import { Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { ok } from '../common/http/api-response';
 import { FishInfoService } from './fish-info.service';
+import { FishSpeciesImportService } from './fish-species-import.service';
 
 @ApiTags('어종 정보 (외부 연동)')
 @Controller('fish-info')
 export class FishInfoController {
-  constructor(private fishInfo: FishInfoService) {}
+  constructor(
+    private fishInfo: FishInfoService,
+    private importer: FishSpeciesImportService,
+  ) {}
 
   @Get('catalog')
   @ApiOperation({ summary: '국내 낚시 어종 전체 카탈로그 (민물·바다·기수)' })
@@ -49,6 +53,6 @@ export class FishInfoController {
     summary: '해양수산부 공공데이터 어류 전종 DB 반영 (~1,300종)',
   })
   async importPublic() {
-    return ok(await this.fishInfo.importPublicFishSpecies());
+    return ok(await this.importer.importPublicFishSpecies());
   }
 }

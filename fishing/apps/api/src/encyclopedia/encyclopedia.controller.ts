@@ -26,13 +26,17 @@ import {
   isEncyclopediaTechnique,
 } from './encyclopedia-filter.util';
 import { EncyclopediaService } from './encyclopedia.service';
+import { EncyclopediaContributionService } from './encyclopedia-contribution.service';
 import { CreateEncyclopediaTipDto } from './dto/create-encyclopedia-tip.dto';
 import { CreateFishSpeciesDto } from './dto/create-fish-species.dto';
 
 @ApiTags('어종 사전')
 @Controller('encyclopedia')
 export class EncyclopediaController {
-  constructor(private encyclopedia: EncyclopediaService) {}
+  constructor(
+    private encyclopedia: EncyclopediaService,
+    private contributions: EncyclopediaContributionService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: '어종 사전 목록 (사진·실전 정보)' })
@@ -86,7 +90,7 @@ export class EncyclopediaController {
     @Body() dto: CreateFishSpeciesDto,
   ) {
     return ok(
-      await this.encyclopedia.createSpecies(
+      await this.contributions.createSpecies(
         user.id,
         dto,
         saveUploadedFile(file),
@@ -127,7 +131,7 @@ export class EncyclopediaController {
     @Body() dto: CreateEncyclopediaTipDto,
   ) {
     return ok(
-      await this.encyclopedia.createTip(
+      await this.contributions.createTip(
         Number(speciesId),
         user.id,
         dto,
@@ -144,7 +148,7 @@ export class EncyclopediaController {
     @Param('tipId') tipId: string,
     @CurrentUser() user: AuthUser,
   ) {
-    await this.encyclopedia.deleteTip(Number(speciesId), tipId, user.id);
+    await this.contributions.deleteTip(Number(speciesId), tipId, user.id);
     return { success: true };
   }
 

@@ -1,19 +1,23 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
-import { FishInfoService } from '../src/fish-info/fish-info.service';
+import { FishSpeciesImportService } from '../src/fish-info/fish-species-import.service';
 
 async function main() {
   console.log('🐟 해양수산부 공공데이터 어류 전종 가져오기...\n');
 
   if (!process.env.MOF_MARINE_SPECIES_URL) {
-    console.error('❌ MOF_MARINE_SPECIES_URL 이 .env에 설정되어 있지 않습니다.');
+    console.error(
+      '❌ MOF_MARINE_SPECIES_URL 이 .env에 설정되어 있지 않습니다.',
+    );
     process.exit(1);
   }
 
   let app;
   try {
-    app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+    app = await NestFactory.createApplicationContext(AppModule, {
+      logger: false,
+    });
   } catch (err) {
     if (isDbConnectionError(err)) {
       printDbHelp();
@@ -22,13 +26,17 @@ async function main() {
     throw err;
   }
 
-  const service = app.get(FishInfoService);
+  const service = app.get(FishSpeciesImportService);
 
   try {
     const result = await service.importPublicFishSpecies();
     console.log(`✅ 낚시 대상 어류 ${result.total}종 처리`);
-    console.log(`   신규 ${result.created} · 갱신 ${result.updated} · 제거 ${result.pruned}`);
-    console.log(`   DB 사전 ${result.dbCount}종 (민물 ${result.freshwater} · 바다 ${result.saltwater})`);
+    console.log(
+      `   신규 ${result.created} · 갱신 ${result.updated} · 제거 ${result.pruned}`,
+    );
+    console.log(
+      `   DB 사전 ${result.dbCount}종 (민물 ${result.freshwater} · 바다 ${result.saltwater})`,
+    );
   } catch (err) {
     if (isDbConnectionError(err)) {
       printDbHelp();
