@@ -1,11 +1,11 @@
-import { AdminService } from './admin.service';
+import { AdminReportsService } from './admin-reports.service';
 
-describe('AdminService.resolveFlaggedReport', () => {
+describe('AdminReportsService.resolve', () => {
   const prisma = {
     catch: { findUnique: jest.fn(), update: jest.fn() },
     contentReport: { updateMany: jest.fn() },
   };
-  const service = new AdminService(prisma as never);
+  const service = new AdminReportsService(prisma as never);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -15,7 +15,7 @@ describe('AdminService.resolveFlaggedReport', () => {
   });
 
   it('한 건 신고를 삭제 처리할 때 메모와 처리 시각을 남긴다', async () => {
-    await service.resolveFlaggedReport('catch', 'c1', 'delete', ' 사진이 같음 ');
+    await service.resolve('catch', 'c1', 'delete', ' 사진이 같음 ');
 
     expect(prisma.contentReport.updateMany).toHaveBeenCalledWith({
       where: { targetType: 'catch', targetId: 'c1', status: 'open' },
@@ -27,13 +27,16 @@ describe('AdminService.resolveFlaggedReport', () => {
     });
     expect(prisma.catch.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ imageHash: null, perceptualHash: null }),
+        data: expect.objectContaining({
+          imageHash: null,
+          perceptualHash: null,
+        }),
       }),
     );
   });
 
   it('무시할 때도 처리 시각을 남긴다', async () => {
-    await service.resolveFlaggedReport('catch', 'c1', 'dismiss');
+    await service.resolve('catch', 'c1', 'dismiss');
     expect(prisma.contentReport.updateMany).toHaveBeenCalledWith({
       where: { targetType: 'catch', targetId: 'c1', status: 'open' },
       data: {

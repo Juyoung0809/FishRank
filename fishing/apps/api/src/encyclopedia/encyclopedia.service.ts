@@ -1,6 +1,13 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { getCatalogEntry, type FishCatalogEntry } from '../fish-info/fish-species-catalog';
+import { getCatalogEntry } from '../fish-info/fish-species-catalog';
+import { pageWindow, paginated } from '../common/pagination.util';
 import { FishNewsClient } from './fish-news.client';
 import type { CreateEncyclopediaTipDto } from './dto/create-encyclopedia-tip.dto';
 import type { CreateFishSpeciesDto } from './dto/create-fish-species.dto';
@@ -8,17 +15,102 @@ import {
   buildEncyclopediaChanges,
   type EncyclopediaEditField,
 } from './encyclopedia-edit.util';
-import { isGenericSummary, mergeBasicInfoWithTips } from './encyclopedia-merge.util';
+import {
+  isGenericSummary,
+  mergeBasicInfoWithTips,
+} from './encyclopedia-merge.util';
 import {
   buildTechniqueSpeciesOr,
-  isEncyclopediaSort,
-  isEncyclopediaTechnique,
   type EncyclopediaSort,
   type EncyclopediaTechnique,
 } from './encyclopedia-filter.util';
-import { buildSpeciesCategoryFilter, formatFishCategoryLabel } from './fish-category.util';
+import {
+  buildSpeciesSummary,
+  extractHabitat,
+} from './encyclopedia-summary.util';
+import {
+  buildSpeciesCategoryFilter,
+  formatFishCategoryLabel,
+} from './fish-category.util';
 
 const DATA_SOURCE = '해양수산부 해양생물종기본정보 · 공공데이터포털';
+const SPECIES_NOT_FOUND = '어종을 찾을 수 없습니다';
+const WITH_NICKNAME = { user: { select: { nickname: true } } } as const;
+
+type TipWithUser = {
+  id: string;
+  userId: string;
+  season: string | null;
+  bait: string | null;
+  technique: string | null;
+  habitat: string | null;
+  note: string | null;
+  summary: string | null;
+  imageUrl: string | null;
+  createdAt: Date;
+  user: { nickname: string };
+};
+
+type SpeciesWithInfo = {
+  id: number;
+  nameKo: string;
+  category: string;
+  imageUrl: string | null;
+  encyclopedia: {
+    description: string;
+    season: string | null;
+    bait: string | null;
+    technique: string | null;
+    habitat: string | null;
+    imageUrl: string | null;
+    avgLengthCm: number | null;
+    minSizeLaw: number | null;
+  } | null;
+  tips: Parameters<typeof mergeBasicInfoWithTips>[1];
+};
+
+function mapTip(t: TipWithUser) {
+  return {
+    id: t.id,
+    userId: t.userId,
+    nickname: t.user.nickname,
+    season: t.season,
+    bait: t.bait,
+    technique: t.technique,
+    habitat: t.habitat,
+    note: t.note,
+    summary: t.summary,
+    imageUrl: t.imageUrl,
+    createdAt: t.createdAt,
+  };
+}
+
+/** 공식 정보(DB·카탈로그)를 기본으로 두고 빈 칸을 낚시인 기여로 채운 현재 사전 내용 */
+function mergedSpeciesInfo(species: SpeciesWithInfo) {
+  const catalog = getCatalogEntry(species.id);
+  const enc = species.encyclopedia;
+  const nameKo = catalog?.nameKo ?? species.nameKo;
+  const summary = buildSpeciesSummary(
+    nameKo,
+    enc?.description,
+    species.category,
+    catalog,
+  );
+
+  const merged = mergeBasicInfoWithTips(
+    {
+      imageUrl: species.imageUrl ?? enc?.imageUrl ?? null,
+      season: enc?.season ?? catalog?.season ?? null,
+      bait: enc?.bait ?? catalog?.bait ?? null,
+      technique: enc?.technique ?? catalog?.technique ?? null,
+      habitat: enc?.habitat ?? extractHabitat(enc?.description),
+      summary: summary && !isGenericSummary(summary, nameKo) ? summary : null,
+      avgLengthCm: enc?.avgLengthCm ?? catalog?.avgLengthCm ?? null,
+    },
+    species.tips,
+  );
+  return { nameKo, catalog, merged };
+}
 
 @Injectable()
 export class EncyclopediaService {
@@ -35,40 +127,29 @@ export class EncyclopediaService {
     sort: EncyclopediaSort = 'name',
     technique: EncyclopediaTechnique = 'all',
   ) {
-    const pageNum = Math.max(1, page);
-    const take = Math.min(100, Math.max(1, limit));
-    const skip = (pageNum - 1) * take;
+    const w = pageWindow(page, limit, 100);
 
     const speciesAnd: Record<string, unknown>[] = [];
     const categoryFilter = buildSpeciesCategoryFilter(category);
     if (categoryFilter) speciesAnd.push(categoryFilter);
-    if (search?.trim()) {
+
+    const q = search?.trim();
+    if (q) {
       speciesAnd.push({
         OR: [
-          { nameKo: { contains: search.trim(), mode: 'insensitive' } },
-          { nameEn: { contains: search.trim(), mode: 'insensitive' } },
-          { scientificName: { contains: search.trim(), mode: 'insensitive' } },
+          { nameKo: { contains: q, mode: 'insensitive' } },
+          { nameEn: { contains: q, mode: 'insensitive' } },
+          { scientificName: { contains: q, mode: 'insensitive' } },
         ],
       });
     }
 
     const techniqueOr = buildTechniqueSpeciesOr(technique);
-    if (techniqueOr) {
-      if (techniqueOr.length === 0) {
-        return {
-          items: [],
-          total: 0,
-          page: pageNum,
-          limit: take,
-          totalPages: 1,
-        };
-      }
-      speciesAnd.push({ OR: techniqueOr });
-    }
+    if (techniqueOr?.length === 0) return paginated([], 0, w.page, w.take);
+    if (techniqueOr) speciesAnd.push({ OR: techniqueOr });
 
-    const speciesWhere = speciesAnd.length > 0 ? { AND: speciesAnd } : {};
-    const where = Object.keys(speciesWhere).length > 0 ? { fishSpecies: speciesWhere } : {};
-
+    const where =
+      speciesAnd.length > 0 ? { fishSpecies: { AND: speciesAnd } } : {};
     const orderBy =
       sort === 'popular'
         ? [
@@ -82,34 +163,55 @@ export class EncyclopediaService {
         where,
         include: { fishSpecies: true },
         orderBy,
-        skip,
-        take,
+        skip: w.skip,
+        take: w.take,
       }),
       this.prisma.fishEncyclopedia.count({ where }),
     ]);
 
-    const items = await this.attachListImages(rows);
+    const items = rows.map((row) => {
+      const catalog = getCatalogEntry(row.fishSpeciesId);
+      const season = row.season ?? catalog?.season ?? null;
+      const bait = row.bait ?? catalog?.bait ?? null;
+      const technique = row.technique ?? catalog?.technique ?? null;
+      return {
+        id: row.fishSpeciesId,
+        fishSpeciesId: row.fishSpeciesId,
+        nameKo: catalog?.nameKo ?? row.fishSpecies.nameKo,
+        nameEn: row.fishSpecies.nameEn,
+        category: row.fishSpecies.category,
+        imageUrl: row.fishSpecies.imageUrl ?? row.imageUrl ?? null,
+        imageAttribution: null,
+        season,
+        bait,
+        technique,
+        minSizeLaw: row.minSizeLaw ?? catalog?.minSizeLaw ?? null,
+        hint: season ?? bait ?? technique,
+      };
+    });
 
-    return {
-      items,
-      total,
-      page: pageNum,
-      limit: take,
-      totalPages: Math.max(1, Math.ceil(total / take)),
-    };
+    return paginated(items, total, w.page, w.take);
   }
 
   async getStats() {
+    const countIn = (category: string) =>
+      this.prisma.fishEncyclopedia.count({
+        where: { fishSpecies: { category } },
+      });
     const [total, freshwater, saltwater, both] = await Promise.all([
       this.prisma.fishEncyclopedia.count(),
-      this.prisma.fishEncyclopedia.count({ where: { fishSpecies: { category: 'freshwater' } } }),
-      this.prisma.fishEncyclopedia.count({ where: { fishSpecies: { category: 'saltwater' } } }),
-      this.prisma.fishEncyclopedia.count({ where: { fishSpecies: { category: 'both' } } }),
+      countIn('freshwater'),
+      countIn('saltwater'),
+      countIn('both'),
     ]);
     return { total, freshwater, saltwater, both };
   }
 
-  async createSpecies(userId: string, dto: CreateFishSpeciesDto, imageUrl?: string | null) {
+  async createSpecies(
+    userId: string,
+    dto: CreateFishSpeciesDto,
+    imageUrl?: string | null,
+  ) {
     const nameKo = dto.nameKo.trim();
     const scientificName = dto.scientificName?.trim() || null;
 
@@ -118,7 +220,9 @@ export class EncyclopediaService {
       select: { id: true, nameKo: true },
     });
     if (duplicateName) {
-      throw new ConflictException(`"${duplicateName.nameKo}"은(는) 이미 사전에 등록된 어종입니다.`);
+      throw new ConflictException(
+        `"${duplicateName.nameKo}"은(는) 이미 사전에 등록된 어종입니다.`,
+      );
     }
 
     if (scientificName) {
@@ -127,15 +231,22 @@ export class EncyclopediaService {
         select: { id: true, nameKo: true },
       });
       if (duplicateSci) {
-        throw new ConflictException(`학명이 "${duplicateSci.nameKo}"과(와) 중복됩니다.`);
+        throw new ConflictException(
+          `학명이 "${duplicateSci.nameKo}"과(와) 중복됩니다.`,
+        );
       }
     }
 
-    const summary = dto.summary?.trim() || `${nameKo} — FishRank 낚시인 사전에 등록된 어종입니다.`;
-    const season = dto.season?.trim() || null;
-    const bait = dto.bait?.trim() || null;
-    const technique = dto.technique?.trim() || null;
-    const habitat = dto.habitat?.trim() || null;
+    const summary =
+      dto.summary?.trim() ||
+      `${nameKo} — FishRank 낚시인 사전에 등록된 어종입니다.`;
+    const info = {
+      season: dto.season?.trim() || null,
+      bait: dto.bait?.trim() || null,
+      technique: dto.technique?.trim() || null,
+      habitat: dto.habitat?.trim() || null,
+      imageUrl: imageUrl ?? null,
+    };
 
     const species = await this.prisma.fishSpecies.create({
       data: {
@@ -143,20 +254,12 @@ export class EncyclopediaService {
         nameEn: dto.nameEn?.trim() || null,
         scientificName,
         category: dto.category,
-        imageUrl: imageUrl ?? null,
+        imageUrl: info.imageUrl,
       },
     });
 
     await this.prisma.fishEncyclopedia.create({
-      data: {
-        fishSpeciesId: species.id,
-        description: summary,
-        season,
-        bait,
-        technique,
-        habitat,
-        imageUrl: imageUrl ?? null,
-      },
+      data: { fishSpeciesId: species.id, description: summary, ...info },
     });
 
     await this.prisma.fishEncyclopediaEditLog.create({
@@ -179,13 +282,9 @@ export class EncyclopediaService {
         data: {
           fishSpeciesId: species.id,
           userId,
-          season,
-          bait,
-          technique,
-          habitat,
+          ...info,
           summary,
           note: dto.note?.trim() || null,
-          imageUrl: imageUrl ?? null,
         },
       });
     }
@@ -204,50 +303,15 @@ export class EncyclopediaService {
       include: {
         encyclopedia: true,
         tips: {
-          include: { user: { select: { nickname: true } } },
+          include: WITH_NICKNAME,
           orderBy: { createdAt: 'desc' },
           take: 30,
         },
       },
     });
+    if (!species) throw new NotFoundException(SPECIES_NOT_FOUND);
 
-    if (!species) throw new NotFoundException('어종을 찾을 수 없습니다');
-
-    const catalog = getCatalogEntry(speciesId);
-    const enc = species.encyclopedia;
-    const nameKo = catalog?.nameKo ?? species.nameKo;
-
-    const officialSummary = this.buildSummaryLocal(
-      nameKo,
-      enc?.description,
-      species.category,
-      catalog,
-    );
-    const summaryOfficial =
-      officialSummary && !isGenericSummary(officialSummary, nameKo) ? officialSummary : null;
-
-    const official = {
-      imageUrl: species.imageUrl ?? enc?.imageUrl ?? null,
-      season: enc?.season ?? catalog?.season ?? null,
-      bait: enc?.bait ?? catalog?.bait ?? null,
-      technique: enc?.technique ?? catalog?.technique ?? null,
-      habitat: enc?.habitat ?? this.extractHabitatFromDescription(enc?.description),
-      summary: summaryOfficial,
-      avgLengthCm: enc?.avgLengthCm ?? catalog?.avgLengthCm ?? null,
-    };
-
-    const merged = mergeBasicInfoWithTips(
-      official,
-      species.tips.map((t) => ({
-        season: t.season,
-        bait: t.bait,
-        technique: t.technique,
-        habitat: t.habitat,
-        note: t.note,
-        summary: t.summary,
-        imageUrl: t.imageUrl,
-      })),
-    );
+    const { nameKo, catalog, merged } = mergedSpeciesInfo(species);
 
     return {
       speciesId: species.id,
@@ -256,34 +320,34 @@ export class EncyclopediaService {
       scientificName: species.scientificName,
       category: species.category,
       imageUrl: merged.imageUrl,
-      imageAttribution: merged.filledByCommunity.imageUrl ? '낚시인 제공' : null,
+      imageAttribution: merged.filledByCommunity.imageUrl
+        ? '낚시인 제공'
+        : null,
       season: merged.season,
       bait: merged.bait,
       technique: merged.technique,
       habitat: merged.habitat,
       distribution: null,
       summary: merged.summary,
-      minSizeLaw: enc?.minSizeLaw ?? catalog?.minSizeLaw ?? null,
+      minSizeLaw:
+        species.encyclopedia?.minSizeLaw ?? catalog?.minSizeLaw ?? null,
       avgLengthCm: merged.avgLengthCm,
       filledByCommunity: merged.filledByCommunity,
       needsFill: merged.needsFill,
-      communityTips: species.tips.map((t) => this.mapTip(t)),
+      communityTips: species.tips.map(mapTip),
       editLogs: await this.getEditLogs(speciesId),
       dataSource: DATA_SOURCE,
     };
   }
 
   async getEditLogs(speciesId: number) {
-    const exists = await this.prisma.fishSpecies.findUnique({ where: { id: speciesId } });
-    if (!exists) throw new NotFoundException('어종을 찾을 수 없습니다');
-
+    await this.assertSpeciesExists(speciesId);
     const logs = await this.prisma.fishEncyclopediaEditLog.findMany({
       where: { fishSpeciesId: speciesId },
-      include: { user: { select: { nickname: true } } },
+      include: WITH_NICKNAME,
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-
     return logs.map((log) => ({
       id: log.id,
       userId: log.userId,
@@ -294,54 +358,24 @@ export class EncyclopediaService {
   }
 
   async getTips(speciesId: number) {
-    const exists = await this.prisma.fishSpecies.findUnique({ where: { id: speciesId } });
-    if (!exists) throw new NotFoundException('어종을 찾을 수 없습니다');
-
+    await this.assertSpeciesExists(speciesId);
     const tips = await this.prisma.fishEncyclopediaTip.findMany({
       where: { fishSpeciesId: speciesId },
-      include: { user: { select: { nickname: true } } },
+      include: WITH_NICKNAME,
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-
-    return tips.map((t) => this.mapTip(t));
-  }
-
-  private mapTip(t: {
-    id: string;
-    userId: string;
-    season: string | null;
-    bait: string | null;
-    technique: string | null;
-    habitat: string | null;
-    note: string | null;
-    summary: string | null;
-    imageUrl: string | null;
-    createdAt: Date;
-    user: { nickname: string };
-  }) {
-    return {
-      id: t.id,
-      userId: t.userId,
-      nickname: t.user.nickname,
-      season: t.season,
-      bait: t.bait,
-      technique: t.technique,
-      habitat: t.habitat,
-      note: t.note,
-      summary: t.summary,
-      imageUrl: t.imageUrl,
-      createdAt: t.createdAt,
-    };
+    return tips.map(mapTip);
   }
 
   async getNews(speciesId: number) {
-    const species = await this.prisma.fishSpecies.findUnique({ where: { id: speciesId } });
-    if (!species) throw new NotFoundException('어종을 찾을 수 없습니다');
-    const catalog = getCatalogEntry(speciesId);
-    return this.news.searchArticles(catalog?.nameKo ?? species.nameKo);
+    const species = await this.assertSpeciesExists(speciesId);
+    return this.news.searchArticles(
+      getCatalogEntry(speciesId)?.nameKo ?? species.nameKo,
+    );
   }
 
+  /** 기여는 현재 사전 내용에 덮어쓴 전체 스냅샷으로 저장하고, 바뀐 칸만 수정 로그로 남긴다. */
   async createTip(
     speciesId: number,
     userId: string,
@@ -350,48 +384,19 @@ export class EncyclopediaService {
   ) {
     const species = await this.prisma.fishSpecies.findUnique({
       where: { id: speciesId },
-      include: {
-        encyclopedia: true,
-        tips: { orderBy: { createdAt: 'desc' } },
-      },
+      include: { encyclopedia: true, tips: { orderBy: { createdAt: 'desc' } } },
     });
-    if (!species) throw new NotFoundException('어종을 찾을 수 없습니다');
+    if (!species) throw new NotFoundException(SPECIES_NOT_FOUND);
 
-    const catalog = getCatalogEntry(speciesId);
-    const nameKo = catalog?.nameKo ?? species.nameKo;
-    const enc = species.encyclopedia;
-    const officialSummary = this.buildSummaryLocal(
-      nameKo,
-      enc?.description,
-      species.category,
-      catalog,
-    );
-    const summaryOfficial =
-      officialSummary && !isGenericSummary(officialSummary, nameKo) ? officialSummary : null;
-
-    const official = {
-      imageUrl: species.imageUrl ?? enc?.imageUrl ?? null,
-      season: enc?.season ?? catalog?.season ?? null,
-      bait: enc?.bait ?? catalog?.bait ?? null,
-      technique: enc?.technique ?? catalog?.technique ?? null,
-      habitat: enc?.habitat ?? this.extractHabitatFromDescription(enc?.description),
-      summary: summaryOfficial,
-      avgLengthCm: enc?.avgLengthCm ?? catalog?.avgLengthCm ?? null,
+    const { merged } = mergedSpeciesInfo(species);
+    const beforeValues: Record<EncyclopediaEditField, string | null> = {
+      season: merged.season,
+      bait: merged.bait,
+      technique: merged.technique,
+      habitat: merged.habitat,
+      summary: merged.summary,
+      imageUrl: merged.imageUrl,
     };
-
-    const merged = mergeBasicInfoWithTips(
-      official,
-      species.tips.map((t) => ({
-        season: t.season,
-        bait: t.bait,
-        technique: t.technique,
-        habitat: t.habitat,
-        note: t.note,
-        summary: t.summary,
-        imageUrl: t.imageUrl,
-      })),
-    );
-
     const afterValues: Record<EncyclopediaEditField, string | null> = {
       season: dto.season?.trim() || merged.season,
       bait: dto.bait?.trim() || merged.bait,
@@ -401,19 +406,9 @@ export class EncyclopediaService {
       imageUrl: imageUrl ?? merged.imageUrl,
     };
 
-    const beforeValues: Record<EncyclopediaEditField, string | null> = {
-      season: merged.season,
-      bait: merged.bait,
-      technique: merged.technique,
-      habitat: merged.habitat,
-      summary: merged.summary,
-      imageUrl: merged.imageUrl,
-    };
-
     const changes = buildEncyclopediaChanges(beforeValues, afterValues);
-
     const nextCategory = dto.category?.trim() || species.category;
-    if (dto.category?.trim() && dto.category.trim() !== species.category) {
+    if (nextCategory !== species.category) {
       changes.push({
         field: 'category',
         label: '분류',
@@ -421,32 +416,21 @@ export class EncyclopediaService {
         newValue: formatFishCategoryLabel(nextCategory),
       });
     }
-
-    if (changes.length === 0) {
+    if (changes.length === 0)
       throw new BadRequestException('변경된 내용이 없습니다.');
-    }
 
     const tip = await this.prisma.fishEncyclopediaTip.create({
       data: {
         fishSpeciesId: speciesId,
         userId,
-        season: afterValues.season,
-        bait: afterValues.bait,
-        technique: afterValues.technique,
-        habitat: afterValues.habitat,
+        ...afterValues,
         note: dto.note?.trim() || null,
-        summary: afterValues.summary,
-        imageUrl: afterValues.imageUrl,
       },
-      include: { user: { select: { nickname: true } } },
+      include: WITH_NICKNAME,
     });
 
     await this.prisma.fishEncyclopediaEditLog.create({
-      data: {
-        fishSpeciesId: speciesId,
-        userId,
-        changes,
-      },
+      data: { fishSpeciesId: speciesId, userId, changes },
     });
 
     if (nextCategory !== species.category) {
@@ -456,44 +440,51 @@ export class EncyclopediaService {
       });
     }
 
-    if (afterValues.imageUrl && afterValues.imageUrl !== beforeValues.imageUrl) {
+    if (
+      afterValues.imageUrl &&
+      afterValues.imageUrl !== beforeValues.imageUrl
+    ) {
       await this.maybePromoteSpeciesImage(speciesId, afterValues.imageUrl);
     }
 
-    return this.mapTip(tip);
+    return mapTip(tip);
   }
 
   async deleteTip(speciesId: number, tipId: string, userId: string) {
     const tip = await this.prisma.fishEncyclopediaTip.findFirst({
       where: { id: tipId, fishSpeciesId: speciesId },
     });
-
     if (!tip) throw new NotFoundException('기여 정보를 찾을 수 없습니다');
-    if (tip.userId !== userId) throw new ForbiddenException('본인이 올린 정보만 삭제할 수 있어요');
+    if (tip.userId !== userId)
+      throw new ForbiddenException('본인이 올린 정보만 삭제할 수 있어요');
 
     await this.prisma.fishEncyclopediaTip.delete({ where: { id: tipId } });
 
     if (tip.imageUrl) {
       const species = await this.prisma.fishSpecies.findUnique({
         where: { id: speciesId },
-        include: { encyclopedia: true },
       });
-      if (species?.imageUrl === tip.imageUrl) {
+      if (species?.imageUrl === tip.imageUrl)
         await this.refreshSpeciesImageFromTips(speciesId);
-      }
     }
   }
 
+  private async assertSpeciesExists(speciesId: number) {
+    const species = await this.prisma.fishSpecies.findUnique({
+      where: { id: speciesId },
+    });
+    if (!species) throw new NotFoundException(SPECIES_NOT_FOUND);
+    return species;
+  }
+
+  /** 공식 사진이 없을 때만 기여 사진을 대표 사진으로 올린다. */
   private async maybePromoteSpeciesImage(speciesId: number, imageUrl: string) {
     const species = await this.prisma.fishSpecies.findUnique({
       where: { id: speciesId },
       include: { encyclopedia: true },
     });
-    if (!species) return;
-
-    const catalog = getCatalogEntry(speciesId);
-    const hasOfficialImage = !!(species.imageUrl ?? species.encyclopedia?.imageUrl);
-    if (hasOfficialImage) return;
+    if (!species || (species.imageUrl ?? species.encyclopedia?.imageUrl))
+      return;
 
     await this.prisma.fishSpecies.update({
       where: { id: speciesId },
@@ -507,13 +498,13 @@ export class EncyclopediaService {
     }
   }
 
+  /** 대표 사진으로 쓰던 기여가 지워지면 가장 최근 기여 사진으로 바꾼다(없으면 비운다). */
   private async refreshSpeciesImageFromTips(speciesId: number) {
     const next = await this.prisma.fishEncyclopediaTip.findFirst({
       where: { fishSpeciesId: speciesId, imageUrl: { not: null } },
       orderBy: { createdAt: 'desc' },
       select: { imageUrl: true },
     });
-
     const imageUrl = next?.imageUrl ?? null;
     await this.prisma.fishSpecies.update({
       where: { id: speciesId },
@@ -523,140 +514,5 @@ export class EncyclopediaService {
       where: { fishSpeciesId: speciesId },
       data: { imageUrl },
     });
-  }
-
-  private async attachListImages(
-    rows: Array<{
-      id: number;
-      fishSpeciesId: number;
-      description: string;
-      season: string | null;
-      bait: string | null;
-      technique: string | null;
-      avgLengthCm: number | null;
-      minSizeLaw: number | null;
-      imageUrl: string | null;
-      fishSpecies: {
-        nameKo: string;
-        nameEn: string | null;
-        scientificName: string | null;
-        category: string;
-        imageUrl: string | null;
-      };
-    }>,
-  ) {
-    const items = rows.map((row) => {
-      const catalog = getCatalogEntry(row.fishSpeciesId);
-      const imageUrl = row.fishSpecies.imageUrl ?? row.imageUrl ?? null;
-      return this.toListItem(row, catalog, imageUrl, null);
-    });
-
-    return items;
-  }
-
-  private toListItem(
-    row: {
-      fishSpeciesId: number;
-      season: string | null;
-      bait: string | null;
-      technique: string | null;
-      minSizeLaw: number | null;
-      fishSpecies: { nameKo: string; nameEn: string | null; category: string };
-    },
-    catalog: ReturnType<typeof getCatalogEntry>,
-    imageUrl: string | null,
-    imageAttribution: string | null,
-  ) {
-    const season = row.season ?? catalog?.season ?? null;
-    const bait = row.bait ?? catalog?.bait ?? null;
-    const technique = row.technique ?? catalog?.technique ?? null;
-    const hint = season ?? bait ?? technique;
-
-    return {
-      id: row.fishSpeciesId,
-      fishSpeciesId: row.fishSpeciesId,
-      nameKo: catalog?.nameKo ?? row.fishSpecies.nameKo,
-      nameEn: row.fishSpecies.nameEn,
-      category: row.fishSpecies.category,
-      imageUrl,
-      imageAttribution,
-      season,
-      bait,
-      technique,
-      minSizeLaw: row.minSizeLaw ?? catalog?.minSizeLaw ?? null,
-      hint,
-    };
-  }
-
-  private buildSummaryLocal(
-    nameKo: string,
-    description: string | null | undefined,
-    category: string,
-    catalog?: FishCatalogEntry,
-  ): string {
-    const fromDescription = this.buildSummaryFromDescription(nameKo, description);
-    if (fromDescription && !this.isCodeTaxonomy(fromDescription)) {
-      return fromDescription;
-    }
-
-    if (catalog) {
-      const hints = [catalog.season, catalog.bait, catalog.technique].filter(Boolean);
-      if (hints.length) {
-        return this.truncate(`${nameKo} — ${hints.join(' · ')}`, 280);
-      }
-    }
-
-    const label =
-      category === 'freshwater'
-        ? '민물'
-        : category === 'saltwater'
-          ? '바다'
-          : category === 'both'
-            ? '민물·바다'
-            : '민물';
-    return `${nameKo}${this.subjectParticle(nameKo)} ${label}에서 만날 수 있는 어종이에요.`;
-  }
-
-  private buildSummaryFromDescription(
-    nameKo: string,
-    description: string | null | undefined,
-  ): string | null {
-    if (!description?.trim()) return null;
-
-    const lines = description
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    for (const line of lines) {
-      if (/^출처:|^학명:|^분류:/.test(line)) continue;
-      if (line.length < 12) continue;
-      if (line.startsWith(`${nameKo}(`) || line.startsWith(`${nameKo}（`)) continue;
-      return this.truncate(line, 280);
-    }
-
-    return null;
-  }
-
-  private isCodeTaxonomy(text: string): boolean {
-    return /^[A-Z]{2}(\s*>\s*[A-Z]{2})+$/i.test(text.trim());
-  }
-
-  private extractHabitatFromDescription(description: string | null | undefined): string | null {
-    if (!description) return null;
-    const match = description.match(/분포:\s*(.+)/);
-    return match?.[1]?.trim().slice(0, 200) ?? null;
-  }
-
-  private truncate(text: string, max: number): string {
-    if (text.length <= max) return text;
-    return `${text.slice(0, max).trim()}…`;
-  }
-
-  private subjectParticle(word: string): string {
-    if (!word) return '는';
-    const code = word.charCodeAt(word.length - 1);
-    if (code < 0xac00 || code > 0xd7a3) return '는';
-    return (code - 0xac00) % 28 === 0 ? '는' : '은';
   }
 }

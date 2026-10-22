@@ -1,6 +1,6 @@
-import { AdminService } from './admin.service';
+import { AdminCatchesService } from './admin-catches.service';
 
-describe('AdminService.reviewCatch 랭킹 점수', () => {
+describe('AdminCatchesService.review 랭킹 점수', () => {
   const prisma = {
     catch: {
       findUnique: jest.fn(),
@@ -10,7 +10,7 @@ describe('AdminService.reviewCatch 랭킹 점수', () => {
       update: jest.fn(),
     },
   };
-  const service = new AdminService(prisma as never);
+  const service = new AdminCatchesService(prisma as never);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -21,7 +21,9 @@ describe('AdminService.reviewCatch 랭킹 점수', () => {
 
   function queueCatch(row: Record<string, unknown>) {
     prisma.catch.findUnique.mockReset();
-    prisma.catch.findUnique.mockResolvedValueOnce(row).mockResolvedValueOnce({ id: row.id });
+    prisma.catch.findUnique
+      .mockResolvedValueOnce(row)
+      .mockResolvedValueOnce({ id: row.id });
   }
 
   it('이미 계산된 점수는 승인 때 덮어쓰지 않는다', async () => {
@@ -33,7 +35,7 @@ describe('AdminService.reviewCatch 랭킹 점수', () => {
       fishSpecies: { rarityWeight: 2 },
     });
 
-    await service.reviewCatch('c1', { status: 'approved' });
+    await service.review('c1', { status: 'approved' });
 
     expect(prisma.catch.update).toHaveBeenCalledWith({
       where: { id: 'c1' },
@@ -50,7 +52,7 @@ describe('AdminService.reviewCatch 랭킹 점수', () => {
       fishSpecies: { rarityWeight: 1.5 },
     });
 
-    await service.reviewCatch('c1', { status: 'approved' });
+    await service.review('c1', { status: 'approved' });
 
     expect(prisma.catch.update).toHaveBeenCalledWith({
       where: { id: 'c1' },
@@ -67,7 +69,7 @@ describe('AdminService.reviewCatch 랭킹 점수', () => {
       fishSpecies: { rarityWeight: 1.5 },
     });
 
-    await service.reviewCatch('c1', { status: 'rejected', note: '규칙 위반' });
+    await service.review('c1', { status: 'rejected', note: '규칙 위반' });
 
     expect(prisma.catch.update).toHaveBeenCalledWith({
       where: { id: 'c1' },

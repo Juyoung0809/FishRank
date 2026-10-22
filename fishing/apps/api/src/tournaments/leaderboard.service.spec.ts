@@ -1,14 +1,20 @@
 import { TournamentsService } from './tournaments.service';
+import { TournamentOrganizerService } from './tournament-organizer.service';
 
 describe('TournamentsService 실시간 순위', () => {
   const prisma = {
     user: { findUnique: jest.fn() },
     tournament: { findUnique: jest.fn() },
-    tournamentEntry: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+    tournamentEntry: {
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
     tournamentDayCode: { count: jest.fn() },
     catch: { findMany: jest.fn() },
   };
   const service = new TournamentsService(prisma as never);
+  const organizer = new TournamentOrganizerService(prisma as never, service);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -47,7 +53,12 @@ describe('TournamentsService 실시간 순위', () => {
 
     const rows = await service.getRanking('tour-1');
     expect(rows).toEqual([
-      expect.objectContaining({ userId: 'user-1', bestLengthCm: 32.5, bestCatchId: 'catch-1', rank: 1 }),
+      expect.objectContaining({
+        userId: 'user-1',
+        bestLengthCm: 32.5,
+        bestCatchId: 'catch-1',
+        rank: 1,
+      }),
     ]);
     expect(prisma.catch.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -100,11 +111,23 @@ describe('TournamentsService 실시간 순위', () => {
   });
 
   it('실격은 참가 행을 지우지 않고 표시만 바꾼다', async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 'org-1', role: 'organizer' });
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'org-1',
+      role: 'organizer',
+    });
     prisma.tournamentEntry.findUnique.mockResolvedValue({ id: 'entry-1' });
-    prisma.tournamentEntry.update.mockResolvedValue({ id: 'entry-1', disqualified: true });
+    prisma.tournamentEntry.update.mockResolvedValue({
+      id: 'entry-1',
+      disqualified: true,
+    });
 
-    await service.setDisqualified('org-1', 'tour-1', 'user-1', true, '사진 재사용');
+    await organizer.setDisqualified(
+      'org-1',
+      'tour-1',
+      'user-1',
+      true,
+      '사진 재사용',
+    );
 
     expect(prisma.tournamentEntry.update).toHaveBeenCalledWith({
       where: { id: 'entry-1' },

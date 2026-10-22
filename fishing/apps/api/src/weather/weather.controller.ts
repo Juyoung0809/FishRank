@@ -1,5 +1,13 @@
-import { Controller, Get, Query, BadRequestException, Header, Param } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Query,
+  BadRequestException,
+  Header,
+  Param,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { ok } from '../common/http/api-response';
 import { WeatherService } from './weather.service';
 import { GeocodeService } from './geocode.service';
 import { MarineConditionsService } from './marine-conditions.service';
@@ -19,21 +27,26 @@ export class WeatherController {
   @ApiOperation({ summary: '낚시 포인트·지역 검색' })
   @ApiQuery({ name: 'q', required: false, example: '해운대' })
   async searchPlaces(@Query('q') q?: string) {
-    const results = q ? await this.geocodeService.search(q) : this.geocodeService.getPresets();
-    return { success: true, data: results };
+    const results = q
+      ? await this.geocodeService.search(q)
+      : this.geocodeService.getPresets();
+    return ok(results);
   }
 
   @Get('presets')
   @ApiOperation({ summary: '추천 낚시 포인트 목록' })
   getPresets() {
-    return { success: true, data: this.geocodeService.getPresets() };
+    return ok(this.geocodeService.getPresets());
   }
 
   @Get('reverse')
   @ApiOperation({ summary: '좌표 → 행정구역 (GPS 지역 추정)' })
   @ApiQuery({ name: 'lat', required: true, example: 37.5665 })
   @ApiQuery({ name: 'lng', required: true, example: 126.978 })
-  async reverseRegion(@Query('lat') latStr: string, @Query('lng') lngStr: string) {
+  async reverseRegion(
+    @Query('lat') latStr: string,
+    @Query('lng') lngStr: string,
+  ) {
     const lat = Number(latStr);
     const lng = Number(lngStr);
 
@@ -41,11 +54,12 @@ export class WeatherController {
       throw new BadRequestException('lat, lng는 숫자여야 합니다');
     }
     if (lat < 33 || lat > 39 || lng < 124 || lng > 132) {
-      throw new BadRequestException('한국 지역 좌표만 지원합니다 (lat 33~39, lng 124~132)');
+      throw new BadRequestException(
+        '한국 지역 좌표만 지원합니다 (lat 33~39, lng 124~132)',
+      );
     }
 
-    const data = await this.geocodeService.reverseRegion(lat, lng);
-    return { success: true, data };
+    return ok(await this.geocodeService.reverseRegion(lat, lng));
   }
 
   @Get()
@@ -66,17 +80,23 @@ export class WeatherController {
       throw new BadRequestException('lat, lng는 숫자여야 합니다');
     }
     if (lat < 33 || lat > 39 || lng < 124 || lng > 132) {
-      throw new BadRequestException('한국 지역 좌표만 지원합니다 (lat 33~39, lng 124~132)');
+      throw new BadRequestException(
+        '한국 지역 좌표만 지원합니다 (lat 33~39, lng 124~132)',
+      );
     }
 
-    const data = await this.weatherService.getWeather(lat, lng, label);
-    return { success: true, data };
+    return ok(await this.weatherService.getWeather(lat, lng, label));
   }
 
   @Get('fishing-index')
   @Header('Cache-Control', 'public, max-age=900')
   @ApiOperation({ summary: 'KHOA 바다낚시지수 (15142486)' })
-  @ApiQuery({ name: 'gubun', required: false, example: '갯바위', description: '갯바위 | 선상' })
+  @ApiQuery({
+    name: 'gubun',
+    required: false,
+    example: '갯바위',
+    description: '갯바위 | 선상',
+  })
   @ApiQuery({ name: 'placeName', required: false, example: '해운대' })
   @ApiQuery({ name: 'lat', required: false })
   @ApiQuery({ name: 'lng', required: false })
@@ -88,13 +108,14 @@ export class WeatherController {
   ) {
     const lat = latStr != null ? Number(latStr) : undefined;
     const lng = lngStr != null ? Number(lngStr) : undefined;
-    const data = await this.marineConditions.getFishingIndex({
-      gubun: gubun === '선상' ? '선상' : '갯바위',
-      placeName,
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lng: Number.isFinite(lng) ? lng : undefined,
-    });
-    return { success: true, data };
+    return ok(
+      await this.marineConditions.getFishingIndex({
+        gubun: gubun === '선상' ? '선상' : '갯바위',
+        placeName,
+        lat: Number.isFinite(lat) ? lat : undefined,
+        lng: Number.isFinite(lng) ? lng : undefined,
+      }),
+    );
   }
 
   @Get('tide-forecast')
@@ -110,12 +131,13 @@ export class WeatherController {
   ) {
     const lat = latStr != null ? Number(latStr) : undefined;
     const lng = lngStr != null ? Number(lngStr) : undefined;
-    const data = await this.marineConditions.getTideForecast({
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lng: Number.isFinite(lng) ? lng : undefined,
-      obsCode,
-    });
-    return { success: true, data };
+    return ok(
+      await this.marineConditions.getTideForecast({
+        lat: Number.isFinite(lat) ? lat : undefined,
+        lng: Number.isFinite(lng) ? lng : undefined,
+        obsCode,
+      }),
+    );
   }
 
   @Get('reservoirs/search')
@@ -124,8 +146,7 @@ export class WeatherController {
   @ApiQuery({ name: 'q', required: true, example: '충주' })
   async searchReservoirs(@Query('q') q: string) {
     if (!q?.trim()) throw new BadRequestException('q 파라미터가 필요합니다');
-    const data = await this.marineConditions.searchReservoirs(q.trim());
-    return { success: true, data };
+    return ok(await this.marineConditions.searchReservoirs(q.trim()));
   }
 
   @Get('reservoirs/near')
@@ -133,14 +154,16 @@ export class WeatherController {
   @ApiOperation({ summary: '좌표 기준 근처 민물 저수지 수위' })
   @ApiQuery({ name: 'lat', required: true, example: 36.971 })
   @ApiQuery({ name: 'lng', required: true, example: 127.933 })
-  async getReservoirNearby(@Query('lat') latStr: string, @Query('lng') lngStr: string) {
+  async getReservoirNearby(
+    @Query('lat') latStr: string,
+    @Query('lng') lngStr: string,
+  ) {
     const lat = Number(latStr);
     const lng = Number(lngStr);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new BadRequestException('lat, lng는 숫자여야 합니다');
     }
-    const data = await this.marineConditions.getReservoirNearby(lat, lng);
-    return { success: true, data };
+    return ok(await this.marineConditions.getReservoirNearby(lat, lng));
   }
 
   @Get('reservoirs/area')
@@ -148,7 +171,12 @@ export class WeatherController {
   @ApiOperation({ summary: '좌표 기준 근처 저수지 목록 (지도·표용)' })
   @ApiQuery({ name: 'lat', required: true, example: 36.971 })
   @ApiQuery({ name: 'lng', required: true, example: 127.933 })
-  @ApiQuery({ name: 'q', required: false, example: '구미', description: '시·군·구 검색어 (미입력 시 좌표 역지오코딩)' })
+  @ApiQuery({
+    name: 'q',
+    required: false,
+    example: '구미',
+    description: '시·군·구 검색어 (미입력 시 좌표 역지오코딩)',
+  })
   async getReservoirsInArea(
     @Query('lat') latStr: string,
     @Query('lng') lngStr: string,
@@ -159,8 +187,7 @@ export class WeatherController {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new BadRequestException('lat, lng는 숫자여야 합니다');
     }
-    const data = await this.marineConditions.getReservoirsInArea(lat, lng, q);
-    return { success: true, data };
+    return ok(await this.marineConditions.getReservoirsInArea(lat, lng, q));
   }
 
   @Get('reservoirs/:facCode/levels')
@@ -173,8 +200,13 @@ export class WeatherController {
     @Query('dateStart') dateStart?: string,
     @Query('dateEnd') dateEnd?: string,
   ) {
-    const data = await this.marineConditions.getReservoirLevels(facCode, dateStart, dateEnd);
-    return { success: true, data };
+    return ok(
+      await this.marineConditions.getReservoirLevels(
+        facCode,
+        dateStart,
+        dateEnd,
+      ),
+    );
   }
 
   @Get('fishing-bans')
@@ -197,11 +229,12 @@ export class WeatherController {
     if (lat < 33 || lat > 39 || lng < 124 || lng > 132) {
       throw new BadRequestException('한국 지역 좌표만 지원합니다');
     }
-    const data = await this.fishingBan.getNearby(
-      lat,
-      lng,
-      Number.isFinite(radiusKm) ? Math.min(Math.max(radiusKm, 10), 200) : 80,
+    return ok(
+      await this.fishingBan.getNearby(
+        lat,
+        lng,
+        Number.isFinite(radiusKm) ? Math.min(Math.max(radiusKm, 10), 200) : 80,
+      ),
     );
-    return { success: true, data };
   }
 }

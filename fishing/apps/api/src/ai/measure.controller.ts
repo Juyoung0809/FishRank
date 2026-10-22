@@ -3,26 +3,28 @@ import {
   Controller,
   Post,
   UploadedFile,
-  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Auth } from '../common/decorators/auth.decorator';
 import { createImageUploadInterceptor } from '../common/upload/upload.config';
 import { ImageMagicInterceptor } from '../common/upload/image-magic.interceptor';
 import { AiService } from '../ai/ai.service';
 
 @ApiTags('정밀 측정')
-@ApiBearerAuth()
 @Controller('ai')
 export class MeasureController {
   constructor(private readonly aiService: AiService) {}
 
   @Post('keypoints')
-  @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: '이미지에서 머리/꼬리 키포인트 검출 (LiDAR 측정용)' })
-  @UseInterceptors(createImageUploadInterceptor('image', 'measure-kp'), ImageMagicInterceptor)
+  @Auth()
+  @ApiOperation({
+    summary: '이미지에서 머리/꼬리 키포인트 검출 (LiDAR 측정용)',
+  })
+  @UseInterceptors(
+    createImageUploadInterceptor('image', 'measure-kp'),
+    ImageMagicInterceptor,
+  )
   async keypoints(@UploadedFile() file: Express.Multer.File) {
     if (!file?.filename) {
       throw new BadRequestException('이미지 파일이 필요합니다.');

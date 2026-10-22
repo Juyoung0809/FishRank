@@ -1,7 +1,11 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Body, Controller, Post } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Auth } from '../common/decorators/auth.decorator';
+import {
+  CurrentUser,
+  type AuthUser,
+} from '../common/decorators/current-user.decorator';
+import { ok } from '../common/http/api-response';
 import { FeedbacksService } from './feedbacks.service';
 import { CreateFeedbackDto } from './dto/create-feedback.dto';
 
@@ -11,11 +15,9 @@ export class FeedbacksController {
   constructor(private feedbacks: FeedbacksService) {}
 
   @Post()
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
+  @Auth()
   @ApiOperation({ summary: '서비스 피드백 제출' })
-  async create(@CurrentUser() user: { id: string }, @Body() dto: CreateFeedbackDto) {
-    const data = await this.feedbacks.create(user.id, dto);
-    return { success: true, data };
+  async create(@CurrentUser() user: AuthUser, @Body() dto: CreateFeedbackDto) {
+    return ok(await this.feedbacks.create(user.id, dto));
   }
 }

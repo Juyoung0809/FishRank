@@ -1,5 +1,10 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AiService } from '../ai/ai.service';
 import { resolveSpeciesId } from '../ai/species-slug.util';
@@ -11,70 +16,112 @@ import {
   removeUploadedFile,
   validatePhotoFreshness,
 } from '../common/upload/image-integrity.util';
-import { isUniqueConstraintError, softDeleteCatchData } from '../common/upload/catch-retention.util';
-import { computePerceptualHash, isNearDuplicate } from '../common/upload/image-phash.util';
+import {
+  isUniqueConstraintError,
+  softDeleteCatchData,
+} from '../common/upload/catch-retention.util';
+import {
+  computePerceptualHash,
+  isNearDuplicate,
+} from '../common/upload/image-phash.util';
 import { parsePageLimit } from '../common/pagination.util';
-import { TournamentsService } from '../tournaments/tournaments.service';
+import {
+  TournamentDayCodeService,
+  type DayCodeClaim,
+} from '../tournaments/tournament-day-code.service';
 import { toPublicCatch, toPublicCatches } from './public-catch';
 
-function claimedLocation(body: { locationLat?: unknown; locationLng?: unknown }) {
+type CatchUploadBody = {
+  locationName?: string;
+  memo?: string;
+  locationLat?: unknown;
+  locationLng?: unknown;
+  lengthCm?: unknown;
+  fishSpeciesId?: unknown;
+  tournamentId?: unknown;
+  dayCode?: unknown;
+};
+
+type PhotoFreshness = {
+  takenAt?: Date;
+  exifLat?: number;
+  exifLng?: number;
+  integrityNote?: string;
+};
+
+const DUPLICATE_IMAGE_MESSAGE =
+  '이미 등록된 사진입니다. 동일 사진 재업로드·타인 사진 도용은 허용되지 않습니다.';
+
+function claimedLocation(body: CatchUploadBody) {
   const lat = Number(body.locationLat);
   const lng = Number(body.locationLng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
   return { lat, lng };
 }
 
-
+/** 폼 값이 0·빈 값·숫자가 아니면 null */
+function optionalNumber(value: unknown): number | null {
+  return Number(value) || null;
+}
 
 @Injectable()
-
 export class CatchesService {
-
   constructor(
     private prisma: PrismaService,
     private aiService: AiService,
-    private tournaments: TournamentsService,
+    private dayCodes: TournamentDayCodeService,
   ) {}
 
+  async createCertified(
+    userId: string,
+    file: Express.Multer.File,
+    body: CatchUploadBody,
+  ) {
+    if (!file?.path) throw new BadRequestException('사진 파일이 필요합니다.');
 
-
-  async createCertified(userId: string, file: Express.Multer.File, body: any) {
-
-    if (!file?.path) {
-      throw new BadRequestException('사진 파일이 필요합니다.');
-    }
-
-    const freshness = await validatePhotoFreshness(file.path, undefined, claimedLocation(body));
+    const freshness = await validatePhotoFreshness(
+      file.path,
+      undefined,
+      claimedLocation(body),
+    );
     if (!freshness.ok) {
       await removeUploadedFile(file.path);
       throw new BadRequestException(freshness.reason);
     }
 
-    const imageHash = await computeImageHash(file.path);
-    await this.assertUniqueImageHash(imageHash, file.path);
-    const perceptualHash = await computePerceptualHash(file.path);
-    await this.assertUniquePerceptualHash(perceptualHash, file.path);
+    const hashes = await this.assertUniqueImage(file.path);
 
-    let claim;
+    let claim: DayCodeClaim;
     try {
-      claim = await this.tournaments.resolveDayCodeClaim(userId, body, new Date(), freshness.takenAt);
+      claim = await this.dayCodes.resolveClaim(
+        userId,
+        body,
+        new Date(),
+        freshness.takenAt,
+      );
     } catch (error) {
       await removeUploadedFile(file.path);
       throw error;
     }
 
-    const notedFreshness = claim.claimedTournamentId && !freshness.takenAt
-      ? { ...freshness, integrityNote: appendIntegrityNote(freshness.integrityNote, 'code_date_unverified') }
-      : freshness;
+    // 촬영 시각이 없으면 코드 날짜와 맞는지 확인할 수 없으니 운영자가 볼 수 있게 표시한다
+    const notedFreshness =
+      claim.claimedTournamentId && !freshness.takenAt
+        ? {
+            ...freshness,
+            integrityNote: appendIntegrityNote(
+              freshness.integrityNote,
+              'code_date_unverified',
+            ),
+          }
+        : freshness;
 
     const imageUrl = `/uploads/${file.filename}`;
-
     const catch_ = await this.createCertifiedRow(
       userId,
       file.path,
       imageUrl,
-      imageHash,
-      perceptualHash,
+      hashes,
       body,
       notedFreshness,
       claim,
@@ -89,99 +136,79 @@ export class CatchesService {
 
     const processed = await this.prisma.catch.findUnique({
       where: { id: catch_.id },
-      include: { certification: { select: { grade: true, errorMessage: true } } },
+      include: {
+        certification: { select: { grade: true, errorMessage: true } },
+      },
     });
 
-    const finalStatus = processed?.status ?? 'pending';
+    const status = processed?.status ?? 'pending';
     const message =
-      finalStatus === 'approved'
+      status === 'approved'
         ? '인증이 완료되었습니다. 랭킹에 반영됩니다.'
-        : finalStatus === 'rejected'
-          ? processed?.certification?.errorMessage ?? '인증 기준이 충족되지 않아 반려되었습니다.'
+        : status === 'rejected'
+          ? (processed?.certification?.errorMessage ??
+            '인증 기준이 충족되지 않아 반려되었습니다.')
           : 'AI 분석 중입니다. 잠시 후 결과를 확인하세요.';
 
     return {
       catchId: catch_.id,
-      status: finalStatus,
+      status,
       recordType: 'certified',
       grade: processed?.certification?.grade ?? null,
       message,
     };
-
   }
 
+  async createPersonal(
+    userId: string,
+    file: Express.Multer.File,
+    body: CatchUploadBody,
+  ) {
+    if (!file?.path) throw new BadRequestException('사진 파일이 필요합니다.');
 
-
-  async createPersonal(userId: string, file: Express.Multer.File, body: any) {
-
-    if (!file?.path) {
-      throw new BadRequestException('사진 파일이 필요합니다.');
-    }
-
-    const imageHash = await computeImageHash(file.path);
-    await this.assertUniqueImageHash(imageHash, file.path);
-    const perceptualHash = await computePerceptualHash(file.path);
-    await this.assertUniquePerceptualHash(perceptualHash, file.path);
-
-    const imageUrl = `/uploads/${file.filename}`;
-
-    const lengthCm = body.lengthCm ? Number(body.lengthCm) : null;
-
-    const fishSpeciesId = body.fishSpeciesId ? Number(body.fishSpeciesId) : null;
-
-
-
-    const catch_ = await this.createPersonalRow(
-      userId,
-      file.path,
-      imageUrl,
-      imageHash,
-      perceptualHash,
-      body,
-      lengthCm,
-      fishSpeciesId,
+    const hashes = await this.assertUniqueImage(file.path);
+    const catch_ = await this.createOrRejectDuplicate(file.path, () =>
+      this.prisma.catch.create({
+        data: {
+          userId,
+          imageUrl: `/uploads/${file.filename}`,
+          ...hashes,
+          locationName: body.locationName || null,
+          memo: body.memo || null,
+          recordType: 'personal',
+          status: 'approved',
+          lengthCm: optionalNumber(body.lengthCm),
+          fishSpeciesId: optionalNumber(body.fishSpeciesId),
+        },
+        include: { fishSpecies: true },
+      }),
     );
 
-
-
     return {
-
       catchId: catch_.id,
-
       status: 'approved',
-
       recordType: 'personal',
-
       message: '자랑 기록이 올라갔습니다. 다른 낚시인의 추천을 받아보세요!',
-
       catch: toPublicCatch(catch_),
-
     };
-
   }
 
-
-
-  private async createCertifiedRow(
+  private createCertifiedRow(
     userId: string,
     filePath: string,
     imageUrl: string,
-    imageHash: string,
-    perceptualHash: string | null,
-    body: { locationName?: string; memo?: string },
-    freshness: { takenAt?: Date; exifLat?: number; exifLng?: number; integrityNote?: string },
-    claim: { claimedTournamentId: string | null; claimedDayCode: string | null; dayCodeStatus: string | null },
+    hashes: { imageHash: string; perceptualHash: string | null },
+    body: CatchUploadBody,
+    freshness: PhotoFreshness,
+    claim: DayCodeClaim,
   ) {
-    try {
-      return await this.prisma.catch.create({
+    return this.createOrRejectDuplicate(filePath, () =>
+      this.prisma.catch.create({
         data: {
           userId,
           imageUrl,
-          imageHash,
-          perceptualHash,
-          claimedTournamentId: claim.claimedTournamentId,
-          claimedDayCode: claim.claimedDayCode,
-          dayCodeStatus: claim.dayCodeStatus,
+          ...hashes,
+          ...claim,
           locationName: body.locationName,
           memo: body.memo,
           photoTakenAt: freshness.takenAt,
@@ -191,91 +218,67 @@ export class CatchesService {
           recordType: 'certified',
           status: 'pending',
         },
-      });
-    } catch (error) {
-      return this.rethrowDuplicateImage(error, filePath);
-    }
+      }),
+    );
   }
 
-  private async createPersonalRow(
-    userId: string,
-    filePath: string,
-    imageUrl: string,
-    imageHash: string,
-    perceptualHash: string | null,
-    body: { locationName?: string; memo?: string },
-    lengthCm: number | null,
-    fishSpeciesId: number | null,
-  ) {
-    try {
-      return await this.prisma.catch.create({
-        data: {
-          userId,
-          imageUrl,
-          imageHash,
-          perceptualHash,
-          locationName: body.locationName || null,
-          memo: body.memo || null,
-          recordType: 'personal',
-          status: 'approved',
-          lengthCm: lengthCm && !Number.isNaN(lengthCm) ? lengthCm : null,
-          fishSpeciesId: fishSpeciesId && !Number.isNaN(fishSpeciesId) ? fishSpeciesId : null,
-        },
-        include: { fishSpecies: true },
-      });
-    } catch (error) {
-      return this.rethrowDuplicateImage(error, filePath);
-    }
-  }
-
-  private async assertUniqueImageHash(imageHash: string, filePath: string) {
+  /** 정확히 같은 사진(SHA)과 살짝 바꾼 사진(지각 해시)을 모두 막는다. 실패하면 업로드 파일을 지운다. */
+  private async assertUniqueImage(filePath: string) {
+    const imageHash = await computeImageHash(filePath);
     const existing = await this.prisma.catch.findFirst({
       where: { imageHash },
       select: { id: true, deletedAt: true },
     });
 
-    if (!existing) return;
-
-    if (!existing.deletedAt) {
+    if (existing && !existing.deletedAt) {
       await removeUploadedFile(filePath);
-      throw new ConflictException(
-        '이미 등록된 사진입니다. 동일 사진 재업로드·타인 사진 도용은 허용되지 않습니다.',
-      );
+      throw new ConflictException(DUPLICATE_IMAGE_MESSAGE);
+    }
+    if (existing) {
+      // 삭제된 기록의 해시는 비워서 같은 사진을 다시 올릴 수 있게 한다
+      await this.prisma.catch.update({
+        where: { id: existing.id },
+        data: { imageHash: null, perceptualHash: null },
+      });
     }
 
-    await this.prisma.catch.update({
-      where: { id: existing.id },
-      data: { imageHash: null, perceptualHash: null },
-    });
-  }
-
-  private async assertUniquePerceptualHash(perceptualHash: string | null, filePath: string) {
-    if (!perceptualHash) return;
-
-    const rows = await this.prisma.catch.findMany({
-      where: { deletedAt: null, perceptualHash: { not: null } },
-      select: { perceptualHash: true },
-    });
-
-    const duplicate = rows.some(
-      (row) => row.perceptualHash && isNearDuplicate(perceptualHash, row.perceptualHash),
-    );
-    if (!duplicate) return;
-
-    await removeUploadedFile(filePath);
-    throw new ConflictException(
-      '이미 등록된 사진과 매우 비슷한 사진입니다. 같은 사진을 조금 바꾼 재업로드는 허용되지 않습니다.',
-    );
-  }
-
-  private async rethrowDuplicateImage(error: unknown, filePath: string): Promise<never> {
-    if (isUniqueConstraintError(error)) {
-      await removeUploadedFile(filePath);
-      throw new ConflictException(
-        '이미 등록된 사진입니다. 동일 사진 재업로드·타인 사진 도용은 허용되지 않습니다.',
-      );
+    const perceptualHash = await computePerceptualHash(filePath);
+    if (perceptualHash) {
+      const rows = await this.prisma.catch.findMany({
+        where: { deletedAt: null, perceptualHash: { not: null } },
+        select: { perceptualHash: true },
+      });
+      if (
+        rows.some(
+          (row) =>
+            row.perceptualHash &&
+            isNearDuplicate(perceptualHash, row.perceptualHash),
+        )
+      ) {
+        await removeUploadedFile(filePath);
+        throw new ConflictException(
+          '이미 등록된 사진과 매우 비슷한 사진입니다. 같은 사진을 조금 바꾼 재업로드는 허용되지 않습니다.',
+        );
+      }
     }
-    throw error;
+
+    return { imageHash, perceptualHash };
+  }
+
+  /** 동시 업로드로 unique 제약에 걸리면 409 로 바꾸고 파일을 지운다. */
+  private async createOrRejectDuplicate<T>(
+    filePath: string,
+    create: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await create();
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        await removeUploadedFile(filePath);
+        throw new ConflictException(DUPLICATE_IMAGE_MESSAGE);
+      }
+      throw error;
+    }
   }
 
   private async discardFailedCertifiedCatch(catchId: string, filePath: string) {
@@ -283,8 +286,6 @@ export class CatchesService {
     await this.prisma.catch.delete({ where: { id: catchId } });
     await removeUploadedFile(filePath);
   }
-
-
 
   private async runAiProcess(catchId: string, imageUrl: string) {
     const analysis = await this.aiService.analyze(catchId, imageUrl);
@@ -304,7 +305,9 @@ export class CatchesService {
 
     const fishSpeciesId = resolveSpeciesId(analysis.speciesDetected);
     const species = fishSpeciesId
-      ? await this.prisma.fishSpecies.findUnique({ where: { id: fishSpeciesId } })
+      ? await this.prisma.fishSpecies.findUnique({
+          where: { id: fishSpeciesId },
+        })
       : null;
 
     const lengthCm = analysis.rulerLengthCm;
@@ -338,123 +341,67 @@ export class CatchesService {
         speciesConfidence: analysis.speciesConfidence,
         ...rules,
         processedAt: new Date(),
-        errorMessage: gradeResult.status === 'rejected' ? gradeResult.reason : null,
+        errorMessage:
+          gradeResult.status === 'rejected' ? gradeResult.reason : null,
       },
     });
   }
-
-
 
   async findById(id: string) {
-
     const catch_ = await this.prisma.catch.findUnique({
-
       where: { id, deletedAt: null },
-
       include: {
-
         user: { select: { id: true, nickname: true, profileImage: true } },
-
         fishSpecies: true,
-
         certification: true,
-
       },
-
     });
-
-
-
     if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
-
     return toPublicCatch(catch_);
-
   }
-
-
 
   async findStatus(id: string) {
-
     const catch_ = await this.prisma.catch.findUnique({
-
       where: { id },
-
       include: {
-
         certification: { select: { grade: true } },
-
         fishSpecies: { select: { nameKo: true } },
-
       },
-
     });
-
-
-
     if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
 
-
-
     return {
-
       status: catch_.status,
-
       recordType: catch_.recordType,
-
       grade: catch_.certification?.grade ?? null,
-
       lengthCm: catch_.lengthCm,
-
       fishSpecies: catch_.fishSpecies?.nameKo ?? null,
-
     };
-
   }
 
-
-
   async findMyList(userId: string, page = 1, limit = 20, recordType?: string) {
-
     const paging = parsePageLimit(page, limit, 20, 50);
-    const skip = (paging.page - 1) * paging.limit;
-
-    const where: any = { userId, deletedAt: null };
-
-    if (recordType === 'certified' || recordType === 'personal') {
-
-      where.recordType = recordType;
-
-    }
-
-
+    const where = {
+      userId,
+      deletedAt: null,
+      ...(recordType === 'certified' || recordType === 'personal'
+        ? { recordType }
+        : {}),
+    };
 
     const [items, total] = await Promise.all([
-
       this.prisma.catch.findMany({
-
         where,
-
         include: {
-
           fishSpecies: true,
-
           certification: { select: { grade: true, errorMessage: true } },
-
         },
-
         orderBy: { createdAt: 'desc' },
-
-        skip,
-
+        skip: (paging.page - 1) * paging.limit,
         take: paging.limit,
-
       }),
-
       this.prisma.catch.count({ where }),
-
     ]);
-
-
 
     return {
       items: toPublicCatches(items),
@@ -470,20 +417,14 @@ export class CatchesService {
     catchId: string,
     body: { memo?: string; locationName?: string; fishSpeciesId?: number },
   ) {
-    const catch_ = await this.prisma.catch.findUnique({
-      where: { id: catchId, deletedAt: null },
-    });
-
-    if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
-    if (catch_.userId !== userId) throw new ForbiddenException('본인 기록만 수정할 수 있습니다.');
-    if (catch_.recordType !== 'personal') {
-      throw new BadRequestException('자랑 기록만 수정할 수 있습니다.');
-    }
+    await this.findOwnPersonal(userId, catchId, '수정');
 
     const data: Record<string, unknown> = {};
     if (body.memo !== undefined) data.memo = body.memo.trim() || null;
-    if (body.locationName !== undefined) data.locationName = body.locationName.trim() || null;
-    if (body.fishSpeciesId !== undefined) data.fishSpeciesId = body.fishSpeciesId;
+    if (body.locationName !== undefined)
+      data.locationName = body.locationName.trim() || null;
+    if (body.fishSpeciesId !== undefined)
+      data.fishSpeciesId = body.fishSpeciesId;
 
     const updated = await this.prisma.catch.update({
       where: { id: catchId },
@@ -494,89 +435,27 @@ export class CatchesService {
   }
 
   async deletePersonal(userId: string, catchId: string) {
-    const catch_ = await this.prisma.catch.findUnique({
-      where: { id: catchId, deletedAt: null },
-    });
-
-    if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
-    if (catch_.userId !== userId) throw new ForbiddenException('본인 기록만 삭제할 수 있습니다.');
-    if (catch_.recordType !== 'personal') {
-      throw new BadRequestException('자랑 기록만 삭제할 수 있습니다.');
-    }
-
+    await this.findOwnPersonal(userId, catchId, '삭제');
     return this.prisma.catch.update({
       where: { id: catchId },
       data: softDeleteCatchData(),
     });
   }
 
-  async addVote(catchId: string, userId: string) {
+  private async findOwnPersonal(
+    userId: string,
+    catchId: string,
+    verb: '수정' | '삭제',
+  ) {
     const catch_ = await this.prisma.catch.findUnique({
       where: { id: catchId, deletedAt: null },
     });
-
     if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
+    if (catch_.userId !== userId)
+      throw new ForbiddenException(`본인 기록만 ${verb}할 수 있습니다.`);
     if (catch_.recordType !== 'personal') {
-      throw new BadRequestException('자랑 기록만 추천할 수 있습니다.');
+      throw new BadRequestException(`자랑 기록만 ${verb}할 수 있습니다.`);
     }
-    if (catch_.userId === userId) {
-      throw new BadRequestException('본인 기록에는 추천할 수 없습니다.');
-    }
-
-    const existing = await this.prisma.catchVote.findUnique({
-      where: { catchId_userId: { catchId, userId } },
-    });
-
-    if (existing) {
-      const voteCount = await this.prisma.catchVote.count({ where: { catchId } });
-      return { voted: true, voteCount };
-    }
-
-    await this.prisma.catchVote.create({ data: { catchId, userId } });
-    const voteCount = await this.prisma.catchVote.count({ where: { catchId } });
-    return { voted: true, voteCount };
-  }
-
-  async toggleVote(catchId: string, userId: string) {
-    const catch_ = await this.prisma.catch.findUnique({
-      where: { id: catchId, deletedAt: null },
-    });
-
-    if (!catch_) throw new NotFoundException('기록을 찾을 수 없습니다.');
-    if (catch_.recordType !== 'personal') {
-      throw new BadRequestException('자랑 기록만 추천할 수 있습니다.');
-    }
-    if (catch_.userId === userId) {
-      throw new BadRequestException('본인 기록에는 추천할 수 없습니다.');
-    }
-
-    const existing = await this.prisma.catchVote.findUnique({
-      where: { catchId_userId: { catchId, userId } },
-    });
-
-    if (existing) {
-      await this.prisma.catchVote.delete({ where: { id: existing.id } });
-      const voteCount = await this.prisma.catchVote.count({ where: { catchId } });
-      return { voted: false, voteCount };
-    }
-
-    await this.prisma.catchVote.create({ data: { catchId, userId } });
-    const voteCount = await this.prisma.catchVote.count({ where: { catchId } });
-    return { voted: true, voteCount };
-  }
-
-  async getVoteSummary(catchId: string, userId?: string) {
-    const [voteCount, myVote] = await Promise.all([
-      this.prisma.catchVote.count({ where: { catchId } }),
-      userId
-        ? this.prisma.catchVote.findUnique({
-            where: { catchId_userId: { catchId, userId } },
-          })
-        : Promise.resolve(null),
-    ]);
-
-    return { voteCount, voted: Boolean(myVote) };
+    return catch_;
   }
 }
-
-

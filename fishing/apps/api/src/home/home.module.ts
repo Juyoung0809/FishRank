@@ -4,10 +4,15 @@ import { HomeService } from './home.service';
 import { RankingsModule } from '../rankings/rankings.module';
 import { TournamentsModule } from '../tournaments/tournaments.module';
 import { PostsModule } from '../posts/posts.module';
-import { AdminModule } from '../admin/admin.module';
+import { AnnouncementsModule } from '../announcements/announcements.module';
 
 @Module({
-  imports: [RankingsModule, TournamentsModule, PostsModule, AdminModule],
+  imports: [
+    RankingsModule,
+    TournamentsModule,
+    PostsModule,
+    AnnouncementsModule,
+  ],
   controllers: [HomeController],
   providers: [HomeService],
 })

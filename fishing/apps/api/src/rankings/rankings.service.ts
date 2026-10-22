@@ -8,6 +8,9 @@ import {
 import { compareOfficialRank, OFFICIAL_RANK_ORDER } from './official-rank';
 import { parseLimit } from '../common/pagination.util';
 
+export type RankingType = 'official' | 'unofficial';
+type PeriodType = 'weekly' | 'alltime';
+
 type RankingEntry = {
   rank: number;
   user: { id: string; nickname: string; profileImage: string | null };
@@ -27,8 +30,6 @@ type RankingEntry = {
   verified: boolean;
 };
 
-export type RankingType = 'official' | 'unofficial';
-
 export type RankingHighlight = RankingEntry & {
   previousRank: number | null;
   rankGain: number;
@@ -37,7 +38,12 @@ export type RankingHighlight = RankingEntry & {
 
 type CatchWithRelations = {
   userId?: string;
-  user: { id: string; nickname: string; profileImage: string | null; activityRegion?: string | null };
+  user: {
+    id: string;
+    nickname: string;
+    profileImage: string | null;
+    activityRegion?: string | null;
+  };
   id: string;
   imageUrl: string;
   locationName: string | null;
@@ -62,6 +68,50 @@ type OvertakeCatch = {
   certification: { grade: string } | null;
 };
 
+type OvertakeEvent = {
+  overtaker: { id: string; nickname: string; profileImage: string | null };
+  overtaken: { id: string; nickname: string; profileImage: string | null };
+  newRank: number;
+  overtakenPreviousRank: number;
+  fishSpecies: { id: number; nameKo: string } | null;
+  lengthCm: unknown;
+  grade: string | null;
+  occurredAt: Date;
+};
+
+function daysAgo(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date;
+}
+
+function briefUser(user: {
+  id: string;
+  nickname: string;
+  profileImage: string | null;
+}) {
+  return {
+    id: user.id,
+    nickname: user.nickname,
+    profileImage: user.profileImage,
+  };
+}
+
+/** 자랑 랭킹: 추천 수 내림차순, 동점이면 최신 기록이 위. */
+function sortByVotes(list: CatchWithRelations[]) {
+  const votesOf = (c: CatchWithRelations) => c._count?.votes ?? 0;
+  return [...list].sort(
+    (a, b) =>
+      votesOf(b) - votesOf(a) || b.createdAt.getTime() - a.createdAt.getTime(),
+  );
+}
+
+function sortForType(list: CatchWithRelations[], rankingType: RankingType) {
+  return rankingType === 'official'
+    ? [...list].sort(compareOfficialRank)
+    : sortByVotes(list);
+}
+
 @Injectable()
 export class RankingsService {
   constructor(private prisma: PrismaService) {}
@@ -73,11 +123,7 @@ export class RankingsService {
   ) {
     const where: Record<string, unknown> =
       rankingType === 'unofficial'
-        ? {
-            status: 'approved',
-            recordType: 'personal',
-            deletedAt: null,
-          }
+        ? { status: 'approved', recordType: 'personal', deletedAt: null }
         : {
             status: 'approved',
             recordType: 'certified',
@@ -85,22 +131,21 @@ export class RankingsService {
             rankScore: { not: null },
           };
 
-    if (speciesId) {
-      where.fishSpeciesId = speciesId;
-    }
-
-    if (weekly) {
-      const weekAgo = new Date();
-      weekAgo.setDate(weekAgo.getDate() - 7);
-      where.createdAt = { gte: weekAgo };
-    }
-
+    if (speciesId) where.fishSpeciesId = speciesId;
+    if (weekly) where.createdAt = { gte: daysAgo(7) };
     return where;
   }
 
-  private catchInclude(rankingType: RankingType) {
+  private catchInclude(rankingType: RankingType, withRegion = false) {
     return {
-      user: { select: { id: true, nickname: true, profileImage: true } },
+      user: {
+        select: {
+          id: true,
+          nickname: true,
+          profileImage: true,
+          activityRegion: withRegion,
+        },
+      },
       fishSpecies: true,
       certification: { select: { grade: true } },
       ...(rankingType === 'unofficial'
@@ -114,50 +159,27 @@ export class RankingsService {
     rank: number,
     rankingType: RankingType,
   ): RankingEntry {
+    const official = rankingType === 'official';
     const voteCount = c._count?.votes ?? 0;
-    const score =
-      rankingType === 'official' ? Number(c.rankScore) : voteCount;
 
     return {
       rank,
-      user: {
-        id: c.user.id,
-        nickname: c.user.nickname,
-        profileImage: c.user.profileImage,
-      },
+      user: briefUser(c.user),
       catch: {
         id: c.id,
         imageUrl: c.imageUrl,
         locationName: c.locationName,
         createdAt: c.createdAt,
-        ...(rankingType === 'unofficial' ? { memo: c.memo ?? null } : {}),
+        ...(official ? {} : { memo: c.memo ?? null }),
       },
       fishSpecies: c.fishSpecies,
       lengthCm: c.lengthCm,
-      rankScore: score,
-      voteCount: rankingType === 'unofficial' ? voteCount : undefined,
-      grade: rankingType === 'official' ? c.certification?.grade ?? null : null,
+      rankScore: official ? Number(c.rankScore) : voteCount,
+      voteCount: official ? undefined : voteCount,
+      grade: official ? (c.certification?.grade ?? null) : null,
       recordType: c.recordType as 'certified' | 'personal',
-      verified: rankingType === 'official',
+      verified: official,
     };
-  }
-
-  private sortRankings(list: CatchWithRelations[]): CatchWithRelations[] {
-    return [...list].sort(compareOfficialRank);
-  }
-
-  private sortUnofficialByVotes(list: CatchWithRelations[]): CatchWithRelations[] {
-    return [...list].sort((a, b) => {
-      const diff = (b._count?.votes ?? 0) - (a._count?.votes ?? 0);
-      if (diff !== 0) return diff;
-      return b.createdAt.getTime() - a.createdAt.getTime();
-    });
-  }
-
-  private rankUnofficialCatches(catches: CatchWithRelations[], limit: number): RankingEntry[] {
-    return this.sortUnofficialByVotes(catches)
-      .slice(0, limit)
-      .map((c, index) => this.mapCatchToRanking(c, index + 1, 'unofficial'));
   }
 
   private async fetchRankedCatches(
@@ -170,176 +192,108 @@ export class RankingsService {
     const catches = await this.prisma.catch.findMany({
       where: this.buildBaseWhere(speciesId, weekly, rankingType),
       include: this.catchInclude(rankingType),
+      // 자랑 랭킹은 추천 수로 정렬해야 해서 전부 불러와 메모리에서 정렬한다
       ...(rankingType === 'official'
         ? { orderBy: OFFICIAL_RANK_ORDER, take: limit }
         : {}),
     });
 
-    if (rankingType === 'official') {
-      return catches.map((c, index) => this.mapCatchToRanking(c, index + 1, rankingType));
-    }
-
-    return this.rankUnofficialCatches(catches, limit);
-  }
-
-  private toHighlight(
-    entry: RankingEntry,
-    previousRank: number | null,
-    rankGain: number,
-    highlightReason: string | null,
-  ): RankingHighlight {
-    return { ...entry, previousRank, rankGain, highlightReason };
-  }
-
-  private async getVoteCountsBefore(catchIds: string[], before: Date): Promise<Map<string, number>> {
-    if (!catchIds.length) return new Map();
-    const rows = await this.prisma.catchVote.groupBy({
-      by: ['catchId'],
-      where: { catchId: { in: catchIds }, createdAt: { lt: before } },
-      _count: { _all: true },
-    });
-    return new Map(rows.map((r) => [r.catchId, r._count._all]));
-  }
-
-  private sortUnofficialByVoteMap(
-    list: CatchWithRelations[],
-    voteMap: Map<string, number>,
-  ): CatchWithRelations[] {
-    return [...list].sort((a, b) => {
-      const diff = (voteMap.get(b.id) ?? 0) - (voteMap.get(a.id) ?? 0);
-      if (diff !== 0) return diff;
-      return b.createdAt.getTime() - a.createdAt.getTime();
-    });
-  }
-
-  private pickBiggestRankGain(
-    topCurrent: CatchWithRelations[],
-    beforeSorted: CatchWithRelations[],
-    rankingType: RankingType,
-    minGain = 2,
-  ): RankingHighlight | null {
-    let best: {
-      catch: CatchWithRelations;
-      currentRank: number;
-      previousRank: number;
-      rankGain: number;
-    } | null = null;
-
-    for (let i = 0; i < topCurrent.length; i++) {
-      const c = topCurrent[i];
-      const currentRank = i + 1;
-      const prevIndex = beforeSorted.findIndex((x) => x.id === c.id);
-      const previousRank = prevIndex >= 0 ? prevIndex + 1 : beforeSorted.length + 1;
-      const rankGain = previousRank - currentRank;
-      if (rankGain < minGain) continue;
-
-      if (
-        !best ||
-        rankGain > best.rankGain ||
-        (rankGain === best.rankGain && currentRank < best.currentRank)
-      ) {
-        best = { catch: c, currentRank, previousRank, rankGain };
-      }
-    }
-
-    if (!best) return null;
-
-    return this.toHighlight(
-      this.mapCatchToRanking(best.catch, best.currentRank, rankingType),
-      best.previousRank,
-      best.rankGain,
-      `${best.previousRank}위 → ${best.currentRank}위`,
+    const ranked: CatchWithRelations[] =
+      rankingType === 'official'
+        ? catches
+        : sortByVotes(catches).slice(0, limit);
+    return ranked.map((c, index) =>
+      this.mapCatchToRanking(c, index + 1, rankingType),
     );
   }
 
+  /** 상위권에서 오늘 0시 이전 대비 가장 크게 오른 기록. 없으면 현재 1위. (공식 랭킹 전용) */
   async getTodayHighlight(
     speciesId?: number,
-    periodType: 'weekly' | 'alltime' = 'weekly',
-    rankingType: RankingType = 'official',
+    periodType: PeriodType = 'weekly',
     topPool = 20,
   ): Promise<RankingHighlight | null> {
-    const weekly = periodType === 'weekly';
-    const rankings = await this.fetchRankedCatches(speciesId, weekly, rankingType, topPool);
-    if (!rankings.length) return null;
+    const allCatches = (await this.prisma.catch.findMany({
+      where: this.buildBaseWhere(
+        speciesId,
+        periodType === 'weekly',
+        'official',
+      ),
+      include: this.catchInclude('official'),
+    })) as CatchWithRelations[];
+    if (!allCatches.length) return null;
 
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    if (rankingType === 'unofficial') {
-      const allCatches = (await this.prisma.catch.findMany({
-        where: this.buildBaseWhere(speciesId, weekly, 'unofficial'),
-        include: this.catchInclude('unofficial'),
-      })) as CatchWithRelations[];
-
-      const catchIds = allCatches.map((c) => c.id);
-      const votesBefore = await this.getVoteCountsBefore(catchIds, startOfToday);
-      const currentVoteMap = new Map<string, number>(
-        allCatches.map((c) => [c.id, c._count?.votes ?? 0]),
-      );
-      const currentSorted = this.sortUnofficialByVoteMap(allCatches, currentVoteMap);
-      const beforeSorted = this.sortUnofficialByVoteMap(
-        allCatches.filter((c) => c.createdAt < startOfToday),
-        votesBefore,
-      );
-
-      const highlight = this.pickBiggestRankGain(
-        currentSorted.slice(0, topPool),
-        beforeSorted,
-        'unofficial',
-      );
-      return highlight ?? this.toHighlight(rankings[0], null, 0, null);
-    }
-
-    const allCatches = (await this.prisma.catch.findMany({
-      where: this.buildBaseWhere(speciesId, weekly, 'official'),
-      include: this.catchInclude('official'),
-    })) as CatchWithRelations[];
-
-    const beforeToday = allCatches.filter((c) => c.createdAt < startOfToday);
-    const currentSorted = this.sortRankings(allCatches);
-    const beforeSorted = this.sortRankings(beforeToday);
-
-    const highlight = this.pickBiggestRankGain(
-      currentSorted.slice(0, topPool),
-      beforeSorted,
+    const currentSorted = sortForType(allCatches, 'official');
+    const beforeSorted = sortForType(
+      allCatches.filter((c) => c.createdAt < startOfToday),
       'official',
     );
 
-    if (highlight) return highlight;
+    // 현재 순위를 위에서부터 훑으므로 상승 폭이 같으면 먼저 찾은(더 높은) 순위가 남는다
+    let best: RankingHighlight | null = null;
+    for (const [i, c] of currentSorted.slice(0, topPool).entries()) {
+      const currentRank = i + 1;
+      const prevIndex = beforeSorted.findIndex((x) => x.id === c.id);
+      const previousRank =
+        prevIndex >= 0 ? prevIndex + 1 : beforeSorted.length + 1;
+      const rankGain = previousRank - currentRank;
+      if (rankGain < 2 || (best && rankGain <= best.rankGain)) continue;
+      best = {
+        ...this.mapCatchToRanking(c, currentRank, 'official'),
+        previousRank,
+        rankGain,
+        highlightReason: `${previousRank}위 → ${currentRank}위`,
+      };
+    }
 
-    const first = currentSorted[0];
-    if (!first) return null;
-    return this.toHighlight(this.mapCatchToRanking(first, 1, 'official'), null, 0, null);
+    return (
+      best ?? {
+        ...this.mapCatchToRanking(currentSorted[0], 1, 'official'),
+        previousRank: null,
+        rankGain: 0,
+        highlightReason: null,
+      }
+    );
   }
 
   async getBragFeed(
     speciesId?: number,
-    periodType: 'weekly' | 'alltime' = 'weekly',
+    periodType: PeriodType = 'weekly',
     excludeUserId?: string,
     limit = 50,
   ) {
-    limit = parseLimit(limit, 50, 100);
-    const weekly = periodType === 'weekly';
-    const where: Record<string, unknown> = this.buildBaseWhere(speciesId, weekly, 'unofficial');
-    if (excludeUserId) {
-      where.userId = { not: excludeUserId };
-    }
+    const where = this.buildBaseWhere(
+      speciesId,
+      periodType === 'weekly',
+      'unofficial',
+    );
+    if (excludeUserId) where.userId = { not: excludeUserId };
 
     const catches = await this.prisma.catch.findMany({
       where,
       include: this.catchInclude('unofficial'),
       orderBy: { createdAt: 'desc' },
-      take: limit,
+      take: parseLimit(limit, 50, 100),
     });
-
     return catches.map((c) => this.mapCatchToRanking(c, 0, 'unofficial'));
   }
 
-  async getTopRankings(speciesId?: number, limit = 10, rankingType: RankingType = 'official') {
+  async getTopRankings(
+    speciesId?: number,
+    limit = 10,
+    rankingType: RankingType = 'official',
+  ) {
     return this.fetchRankedCatches(speciesId, false, rankingType, limit);
   }
 
-  async getWeeklyRankings(speciesId?: number, limit = 10, rankingType: RankingType = 'official') {
+  async getWeeklyRankings(
+    speciesId?: number,
+    limit = 10,
+    rankingType: RankingType = 'official',
+  ) {
     return this.fetchRankedCatches(speciesId, true, rankingType, limit);
   }
 
@@ -347,16 +301,13 @@ export class RankingsService {
     const topRanking = await this.getWeeklyRankings(undefined, 1, 'official');
     const topRankSpecies = topRanking[0]?.fishSpecies?.nameKo ?? null;
 
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-
-    const grouped = await this.prisma.catch.groupBy({
+    const [topGroup] = await this.prisma.catch.groupBy({
       by: ['fishSpeciesId'],
       where: {
         status: 'approved',
         recordType: 'certified',
         deletedAt: null,
-        createdAt: { gte: weekAgo },
+        createdAt: { gte: daysAgo(7) },
         fishSpeciesId: { not: null },
       },
       _count: { _all: true },
@@ -364,59 +315,52 @@ export class RankingsService {
       take: 1,
     });
 
-    const topGroup = grouped[0];
-    let popularSpecies: string | null = null;
-    let popularCatchCount = 0;
-
-    if (topGroup?.fishSpeciesId) {
-      const species = await this.prisma.fishSpecies.findUnique({
-        where: { id: topGroup.fishSpeciesId },
-        select: { nameKo: true },
-      });
-      popularSpecies = species?.nameKo ?? null;
-      popularCatchCount = topGroup._count._all;
+    if (!topGroup?.fishSpeciesId) {
+      return { topRankSpecies, popularSpecies: null, popularCatchCount: 0 };
     }
 
+    const species = await this.prisma.fishSpecies.findUnique({
+      where: { id: topGroup.fishSpeciesId },
+      select: { nameKo: true },
+    });
     return {
       topRankSpecies,
-      popularSpecies,
-      popularCatchCount,
+      popularSpecies: species?.nameKo ?? null,
+      popularCatchCount: topGroup._count._all,
     };
+  }
+
+  /** 지역 판정에 활동 지역이 필요해서 사용자 활동 지역까지 함께 불러와 정렬한다. */
+  private async fetchSortedWithRegion(
+    periodType: PeriodType,
+    speciesId: number | undefined,
+    rankingType: RankingType,
+  ) {
+    const catches = (await this.prisma.catch.findMany({
+      where: this.buildBaseWhere(
+        speciesId,
+        periodType === 'weekly',
+        rankingType,
+      ),
+      include: this.catchInclude(rankingType, true),
+    })) as CatchWithRelations[];
+    return sortForType(catches, rankingType);
   }
 
   async getRegionalKings(
     level: RegionLevel,
-    periodType: 'weekly' | 'alltime' = 'weekly',
+    periodType: PeriodType = 'weekly',
     speciesId?: number,
     rankingType: RankingType = 'official',
   ) {
-    const catches = (await this.prisma.catch.findMany({
-      where: this.buildBaseWhere(speciesId, periodType === 'weekly', rankingType),
-      include: {
-        user: {
-          select: {
-            id: true,
-            nickname: true,
-            profileImage: true,
-            activityRegion: true,
-          },
-        },
-        fishSpecies: true,
-        certification: { select: { grade: true } },
-        ...(rankingType === 'unofficial'
-          ? { _count: { select: { votes: true } } }
-          : {}),
-      },
-    })) as CatchWithRelations[];
-
-    const ranked =
-      rankingType === 'official'
-        ? this.sortRankings(catches)
-        : this.sortUnofficialByVotes(catches);
+    const ranked = await this.fetchSortedWithRegion(
+      periodType,
+      speciesId,
+      rankingType,
+    );
 
     const kings = new Map<string, RankingEntry>();
     const counts = new Map<string, number>();
-
     for (const c of ranked) {
       const regionKey = resolveCatchRegionKey(
         c.user.activityRegion,
@@ -424,11 +368,9 @@ export class RankingsService {
         level,
       );
       if (!regionKey) continue;
-
       counts.set(regionKey, (counts.get(regionKey) ?? 0) + 1);
-      if (!kings.has(regionKey)) {
+      if (!kings.has(regionKey))
         kings.set(regionKey, this.mapCatchToRanking(c, 1, rankingType));
-      }
     }
 
     return Array.from(kings.entries())
@@ -444,69 +386,40 @@ export class RankingsService {
   async getRegionalRankings(
     regionKey: string,
     level: RegionLevel,
-    periodType: 'weekly' | 'alltime' = 'weekly',
+    periodType: PeriodType = 'weekly',
     speciesId?: number,
     limit = 20,
     rankingType: RankingType = 'official',
   ) {
-    limit = parseLimit(limit, 20, 50);
-    const catches = (await this.prisma.catch.findMany({
-      where: this.buildBaseWhere(speciesId, periodType === 'weekly', rankingType),
-      include: {
-        user: {
-          select: {
-            id: true,
-            nickname: true,
-            profileImage: true,
-            activityRegion: true,
-          },
-        },
-        fishSpecies: true,
-        certification: { select: { grade: true } },
-        ...(rankingType === 'unofficial'
-          ? { _count: { select: { votes: true } } }
-          : {}),
-      },
-    })) as CatchWithRelations[];
-
-    const filtered = catches.filter((c) =>
-      resolveCatchRegionKey(c.user.activityRegion, c.locationName, level) === regionKey,
+    const ranked = (
+      await this.fetchSortedWithRegion(periodType, speciesId, rankingType)
+    ).filter(
+      (c) =>
+        resolveCatchRegionKey(c.user.activityRegion, c.locationName, level) ===
+        regionKey,
     );
-
-    const ranked =
-      rankingType === 'official'
-        ? this.sortRankings(filtered)
-        : this.sortUnofficialByVotes(filtered);
 
     return {
       regionKey,
       regionName: getRegionDisplayName(regionKey, level),
-      rankings: ranked.slice(0, limit).map((c, index) =>
-        this.mapCatchToRanking(c, index + 1, rankingType),
-      ),
+      rankings: ranked
+        .slice(0, parseLimit(limit, 20, 50))
+        .map((c, index) => this.mapCatchToRanking(c, index + 1, rankingType)),
     };
   }
 
-  private sortOvertakePool(list: OvertakeCatch[]): OvertakeCatch[] {
-    return [...list].sort(compareOfficialRank);
-  }
-
+  /** 최근 14일 기록 중 공식 상위 topN 안에서 다른 사람을 밀어낸 사건. */
   async getTopOvertakes(
-    periodType: 'weekly' | 'alltime' = 'weekly',
+    periodType: PeriodType = 'weekly',
     speciesId?: number,
     topN = 10,
     limit = 8,
-    rankingType: RankingType = 'official',
   ) {
     topN = parseLimit(topN, 10, 50);
     limit = parseLimit(limit, 8, 30);
-    if (rankingType === 'unofficial') {
-      return [];
-    }
 
-    const weekly = periodType === 'weekly';
     const allCatches = (await this.prisma.catch.findMany({
-      where: this.buildBaseWhere(speciesId, weekly),
+      where: this.buildBaseWhere(speciesId, periodType === 'weekly'),
       include: {
         user: { select: { id: true, nickname: true, profileImage: true } },
         fishSpecies: { select: { id: true, nameKo: true } },
@@ -514,59 +427,39 @@ export class RankingsService {
       },
     })) as OvertakeCatch[];
 
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 14);
-
+    const cutoff = daysAgo(14);
     const recent = allCatches
       .filter((c) => c.createdAt >= cutoff)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-
-    type OvertakeEvent = {
-      overtaker: { id: string; nickname: string; profileImage: string | null };
-      overtaken: { id: string; nickname: string; profileImage: string | null };
-      newRank: number;
-      overtakenPreviousRank: number;
-      fishSpecies: { id: number; nameKo: string } | null;
-      lengthCm: unknown;
-      grade: string | null;
-      occurredAt: Date;
-    };
+    const topOf = (pool: OvertakeCatch[]) =>
+      [...pool].sort(compareOfficialRank).slice(0, topN);
 
     const events: OvertakeEvent[] = [];
-    const seenCatchIds = new Set<string>();
-
     for (const c of recent) {
-      if (seenCatchIds.has(c.id)) continue;
-
-      const beforePool = allCatches.filter((x) => x.createdAt < c.createdAt);
-      const afterPool = allCatches.filter((x) => x.createdAt <= c.createdAt);
-
-      const beforeTop = this.sortOvertakePool(beforePool).slice(0, topN);
-      const afterTop = this.sortOvertakePool(afterPool).slice(0, topN);
+      const beforeTop = topOf(
+        allCatches.filter((x) => x.createdAt < c.createdAt),
+      );
+      const afterTop = topOf(
+        allCatches.filter((x) => x.createdAt <= c.createdAt),
+      );
 
       const newRank = afterTop.findIndex((x) => x.id === c.id) + 1;
-      if (newRank <= 0 || newRank > topN) continue;
+      if (newRank <= 0) continue;
 
       const displaced = beforeTop[newRank - 1];
-      if (!displaced || displaced.id === c.id) continue;
-      if (displaced.userId === c.userId) continue;
+      if (!displaced || displaced.id === c.id || displaced.userId === c.userId)
+        continue;
       if (Number(c.rankScore) <= Number(displaced.rankScore)) continue;
 
-      const displacedAfterRank = afterTop.findIndex((x) => x.id === displaced.id);
-      if (displacedAfterRank !== -1 && displacedAfterRank + 1 <= newRank) continue;
+      const displacedAfterRank = afterTop.findIndex(
+        (x) => x.id === displaced.id,
+      );
+      if (displacedAfterRank !== -1 && displacedAfterRank + 1 <= newRank)
+        continue;
 
-      seenCatchIds.add(c.id);
       events.push({
-        overtaker: {
-          id: c.user.id,
-          nickname: c.user.nickname,
-          profileImage: c.user.profileImage,
-        },
-        overtaken: {
-          id: displaced.user.id,
-          nickname: displaced.user.nickname,
-          profileImage: displaced.user.profileImage,
-        },
+        overtaker: briefUser(c.user),
+        overtaken: briefUser(displaced.user),
         newRank,
         overtakenPreviousRank: newRank,
         fishSpecies: c.fishSpecies,
@@ -574,7 +467,6 @@ export class RankingsService {
         grade: c.certification?.grade ?? null,
         occurredAt: c.createdAt,
       });
-
       if (events.length >= limit) break;
     }
 
